@@ -14,6 +14,7 @@ testpaths = ["tests"]
 
 [tool.uv]
 package = true
+cache-dir = ".uv-cache"
 
 [build-system]
 requires = ["hatchling"]
@@ -23,7 +24,6 @@ build-backend = "hatchling.build"
 packages = ["src/x2_ps5_teleop", "demo"]
 
 [project.scripts]
-x2-teleop-sim = "x2_ps5_teleop.sim:main"
-x2-teleop-ros = "x2_ps5_teleop.ros_node:main"
 x2-ps5-input-test = "x2_ps5_teleop.dualsense_test:main"
+x2-node-inspect = "x2_ps5_teleop.inspect_node:main"
 x2-teleop-demo = "demo.teleop_demo:main"

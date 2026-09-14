@@ -14,9 +14,18 @@ def test_axis_mapping_and_deadzone():
 
 def test_mode_buttons_are_rising_edge_only():
     teleop = Ps5Teleop()
-    assert teleop.update(sample(buttons=(0, 0, 0, 1)), now=10).mode == Mode.RL
-    assert teleop.update(sample(buttons=(0, 0, 0, 1), stamp=10.1), now=10.1).mode is None
+    assert teleop.update(sample(buttons=(0, 0, 1, 0)), now=10).mode == Mode.RL
+    assert teleop.update(sample(buttons=(0, 0, 1, 0), stamp=10.1), now=10.1).mode is None
     assert teleop.update(sample(buttons=(), stamp=10.2), now=10.2).mode is None
+
+
+def test_standard_dualsense_square_and_triangle_modes():
+    teleop = Ps5Teleop()
+    assert teleop.mapping.square == 2
+    assert teleop.mapping.triangle == 3
+    assert teleop.update(sample(buttons=(0, 0, 1, 0)), now=10).mode == Mode.RL
+    teleop.update(sample(buttons=(), stamp=10.1), now=10.1)
+    assert teleop.update(sample(buttons=(0, 0, 0, 1), stamp=10.2), now=10.2).mode == Mode.JOINT
 
 
 def test_hand_actions_map_to_l1_r1_and_triggers():
@@ -26,7 +35,7 @@ def test_hand_actions_map_to_l1_r1_and_triggers():
 
 
 def test_mode_and_hand_events_can_share_a_frame():
-    out = Ps5Teleop().update(sample(axes=(0, 0, 0, 0, 0, 1), buttons=(0, 0, 0, 1, 0, 1)), now=10)
+    out = Ps5Teleop().update(sample(axes=(0, 0, 0, 0, 0, 1), buttons=(0, 0, 1, 0, 0, 1)), now=10)
     assert out.mode == Mode.RL
     assert out.hand_actions == (HandAction.R1, HandAction.RT)
 

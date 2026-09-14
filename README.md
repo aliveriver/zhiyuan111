@@ -11,7 +11,7 @@ DualSense 蓝牙 -> 输入读取器 -> IDLE/TELEOP 状态机 -> Mock 或 AimDK R
 ## 安装与测试
 
 ```powershell
-uv sync --group dev
+uv sync
 uv run pytest
 ```
 
@@ -39,7 +39,7 @@ Mock 会打印 `STATE=...`、`MOVE vx=... vy=... wz=...`、`MODE=...` 和 `HAND 
 uv run x2-ps5-input-test
 ```
 
-程序会持续打印 `LX`、`LY`、`RX`、`RY`、`LT`、`RT`、`L1`、`R1`、`Cross`、`Circle`、`Square` 和 `Triangle`，以及 `connected`/`disconnected` 状态变化。SDL 编号可能随固件变化，修改 `config/controller.yaml` 前请先核对此输出。
+程序会持续打印 `LX`、`LY`、`RX`、`RY`、`LT`、`RT`、`L1`、`R1`、`Cross`、`Circle`、`Square` 和 `Triangle`，以及 `connected`/`disconnected` 状态变化。SDL 编号可能随固件变化，修改 `config/controller.json` 前请先核对此输出。
 
 ## 映射
 
@@ -52,7 +52,8 @@ uv run x2-ps5-input-test
 | × / ○ / △ / □ | PASSIVE / DAMPING / JOINT / STAND |
 | RT / LT / R1 / L1 | 四个动作事件（当前配置为上肢验证动作） |
 
-实际 SDL 编号需先运行输入诊断确认，之后调整 `config/controller.yaml`。
+实际 SDL 编号需先运行输入诊断确认，之后调整 `config/controller.json`。
+也可以通过 `--config /path/to/controller.json` 使用另一份配置。
 
 ## X2 ROS 2 模式
 
@@ -74,18 +75,18 @@ python3 demo/teleop_demo.py --robot x2
 
 适配层使用 AimDK X2 1.0.0 文档中确认的接口：`/aima/mc/locomotion/velocity`
 （`aimdk_msgs/msg/McLocomotionVelocity`）、`/aimdk_5Fmsgs/srv/SetMcAction`、
-`/aimdk_5Fmsgs/srv/SetMcPresetMotion` 和 `/aimdk_5Fmsgs/srv/SetMcInputSource`。
+`/aimdk_5Fmsgs/srv/GetHandType`、`/aimdk_5Fmsgs/srv/SetMcInputSource` 和
+`/aima/hal/joint/hand/command`（`aimdk_msgs/msg/HandCommandArray`）。
 请在开发计算机（`10.0.1.41`）或外部有线主机上运行，绝不要在 PC1（`10.0.1.40`）上运行。
 
-当前配置的官方预设动作实际是上肢验证动作：RT 右手挥手 `(motion=1002, area=2)`、LT
-左手挥手 `(1002, 1)`、R1 右手举手 `(1001, 2)`、L1 左手举手 `(1001, 1)`。这些动作
-不是灵巧手手指姿态，不能作为“张手、握拳、抓取、释放”的实现。灵巧手接口
-`/aima/hal/joint/hand/command` 的关节顺序、单位和限位仍需在现场确认，确认前不要发送猜测的
-关节数组。任何真机测试前都要确认服务可用且机器人状态正常；物理急停始终是必须保留的安全措施。
+RT/LT/R1/L1 触发配置化的 OmniHand `HandCommandArray` 姿态；每只手发布 10 个带官方名称
+和运动参数的命令槽。位置值需要在现场根据手部状态反馈和安全范围标定。预设动作触发后程序
+会退回 `IDLE`，需要再次按 `OPTIONS` 才能恢复移动。
+任何真机测试前都要确认服务可用且机器人状态正常；物理急停始终是必须保留的安全措施。
 
-## 排查记录
+## 仓库原有排查记录（部署前需复核）
 
-已检查节点均为 Ubuntu 22.04.5 / ROS 2 Humble：`10.0.1.40` 是运行
+仓库原有记录显示节点均为 Ubuntu 22.04.5 / ROS 2 Humble：`10.0.1.40` 是运行
 `mc_app_main`、EtherCAT 和原生 `aima-rc-app` 的运控 PC1；`10.0.1.41` 是运行
 AimDK 控制图的开发计算机；`10.0.1.42` 是感知/交互计算机。出厂遥控器通过机器人
 蓝牙设置配对，并使用 PS 徽标键唤醒。文档记录的启动门限为前进 0.09 m/s、横移
@@ -101,7 +102,7 @@ AimDK 控制图的开发计算机；`10.0.1.42` 是感知/交互计算机。出�
   `ls -l /dev/input`、`cat /proc/bus/input/devices`，以及 `systemctl is-active bluetooth`。
   若手柄已连接到 X2 原生蓝牙或官方遥操链路，它不会作为 PC2 的 Linux HID 设备出现，请先
   暂停官方遥操连接或改为配对到 PC2。
-- 按钮或轴错误：查看诊断输出，并调整 `config/controller.yaml`。
+- 按钮或轴错误：查看诊断输出，并调整 `config/controller.json`。
 - ROS 导入错误：以 `run` 用户运行，加载 `/agibot/software/cobridge/setup.bash`，并导出上文所示的 `common`/`ec` Python 和库路径。
 - 服务不可用：在 PC2 或外部有线主机上检查 `ros2 service list`。
 - 机器人不移动：确认 `STATE=TELEOP`、物理急停已释放、机器人处于稳定状态，并确认 MC 仲裁接受 `ps5_demo`。

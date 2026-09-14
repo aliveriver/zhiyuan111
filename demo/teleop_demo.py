@@ -12,9 +12,9 @@ import sys
 import time
 
 from x2_ps5_teleop.controller.dualsense import DualSenseReader
-from x2_ps5_teleop.controller.mapping import DEFAULT_MAPPING
-from x2_ps5_teleop.core import JoySample
+from x2_ps5_teleop.core import JoySample, Mapping
 from x2_ps5_teleop.robot.motion import MockRobot, X2RosRobot
+from x2_ps5_teleop.settings import DEFAULT_CONFIG_PATH, Settings, load_settings
 from x2_ps5_teleop.teleop.state_machine import TeleopOutput, TeleopState, TeleopStateMachine
 
 
@@ -30,20 +30,23 @@ def _dispatch(robot, teleop: TeleopStateMachine, output: TeleopOutput, previous_
     for action in output.hand_actions:
         robot.stop()
         robot.hand_action(action)
+        teleop.enter_idle()
+        print("STATE=IDLE (preset action requires re-arm)", flush=True)
+        return TeleopState.IDLE
     return output.state
 
 
-def _sample_from_line(line: str, now: float) -> JoySample | None:
+def _sample_from_line(line: str, now: float, mapping: Mapping) -> JoySample | None:
     words = line.strip().split()
     if not words:
         return None
     command = words[0].lower()
     if command == "teleop":
-        return JoySample(buttons=(0,) * DEFAULT_MAPPING.teleop_toggle + (1,), stamp=now)
+        return JoySample(buttons=(0,) * mapping.teleop_toggle + (1,), stamp=now)
     if command == "idle":
         return JoySample(stamp=now)
     if command == "estop":
-        return JoySample(buttons=(0,) * DEFAULT_MAPPING.emergency_stop + (1,), stamp=now)
+        return JoySample(buttons=(0,) * mapping.emergency_stop + (1,), stamp=now)
     if command == "disconnect":
         return JoySample(connected=False, stamp=now)
     if command == "clear":
@@ -57,8 +60,8 @@ def _sample_from_line(line: str, now: float) -> JoySample | None:
     return JoySample(axes=axes, buttons=buttons, stamp=now)
 
 
-def run_mock() -> None:
-    teleop = TeleopStateMachine(DEFAULT_MAPPING)
+def run_mock(settings: Settings) -> None:
+    teleop = TeleopStateMachine(settings.mapping, timeout=settings.timeout)
     robot = MockRobot(sys.stdout)
     previous_state = None
     print("STATE=IDLE")
@@ -68,7 +71,7 @@ def run_mock() -> None:
             if line.strip().lower() in {"quit", "exit"}:
                 break
             try:
-                sample = _sample_from_line(line, time.monotonic())
+                sample = _sample_from_line(line, time.monotonic(), settings.mapping)
             except ValueError as exc:
                 print(f"错误：{exc}", file=sys.stderr)
                 continue
@@ -80,7 +83,9 @@ def run_mock() -> None:
                 teleop.clear_estop()
                 output = teleop.tick()
             elif line.strip().lower() == "idle" and teleop.state == TeleopState.TELEOP:
-                output = teleop.update(JoySample(buttons=(0,) * DEFAULT_MAPPING.teleop_toggle + (1,), stamp=time.monotonic()))
+                output = teleop.update(
+                    JoySample(buttons=(0,) * settings.mapping.teleop_toggle + (1,), stamp=time.monotonic())
+                )
             elif line.strip().lower() == "teleop" and teleop.state == TeleopState.TELEOP:
                 output = teleop.tick()
             else:
@@ -92,10 +97,10 @@ def run_mock() -> None:
         robot.close()
 
 
-def run_x2() -> None:
-    teleop = TeleopStateMachine(DEFAULT_MAPPING)
-    robot = X2RosRobot()
-    reader = DualSenseReader(DEFAULT_MAPPING)
+def run_x2(settings: Settings) -> None:
+    teleop = TeleopStateMachine(settings.mapping, timeout=settings.timeout)
+    robot = X2RosRobot(source=settings.source, preset_actions=settings.presets)
+    reader = DualSenseReader(settings.mapping, name_hint=settings.controller_name_hint)
     previous_state = None
     try:
         reader.start()
@@ -113,11 +118,13 @@ def run_x2() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="AgiBot X2 的最小 PS5 DualSense 遥操作演示")
     parser.add_argument("--robot", choices=("mock", "x2"), default="mock")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="手柄和机器人 JSON 配置")
     args = parser.parse_args()
+    settings = load_settings(args.config)
     if args.robot == "mock":
-        run_mock()
+        run_mock(settings)
     else:
-        run_x2()
+        run_x2(settings)
 
 
 if __name__ == "__main__":

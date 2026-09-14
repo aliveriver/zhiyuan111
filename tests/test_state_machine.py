@@ -37,7 +37,7 @@ def test_teleop_maps_axes_modes_and_presets():
     assert output.linear_x == DEFAULT_MAPPING.max_linear_x
     assert output.linear_y > 0
     assert output.angular_z > 0
-    assert set(output.hand_actions) == {HandAction.R1, HandAction.RT}
+    assert output.hand_actions == (HandAction.R1,)
     mode = teleop.update(frame(buttons=press(DEFAULT_MAPPING.square)), now=10).mode
     assert mode == Mode.RL
 
@@ -57,3 +57,26 @@ def test_disconnect_timeout_and_estop_zero_output():
     assert (estop.linear_x, estop.linear_y, estop.angular_z) == (0, 0, 0)
     teleop.clear_estop()
     assert teleop.state == TeleopState.IDLE
+
+
+def test_only_one_preset_is_emitted_per_input_frame():
+    teleop = TeleopStateMachine(DEFAULT_MAPPING)
+    teleop.update(frame(buttons=press(DEFAULT_MAPPING.teleop_toggle)), now=10)
+
+    output = teleop.update(
+        frame(axes=(0, 0, 0, 0, 1, 1), buttons=(0, 0, 0, 0, 1, 1)),
+        now=10,
+    )
+
+    assert output.hand_actions == (HandAction.L1,)
+
+
+def test_enter_idle_requires_explicit_rearm():
+    teleop = TeleopStateMachine(DEFAULT_MAPPING)
+    teleop.update(frame(buttons=press(DEFAULT_MAPPING.teleop_toggle)), now=10)
+    teleop.enter_idle()
+
+    stopped = teleop.update(frame(axes=(0, -1), stamp=10.1), now=10.1)
+
+    assert stopped.state == TeleopState.IDLE
+    assert stopped.linear_x == 0

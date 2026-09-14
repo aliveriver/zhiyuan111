@@ -56,8 +56,8 @@ class Mapping:
     rt: int = 5
     cross: int = 0
     circle: int = 1
-    triangle: int = 2
-    square: int = 3
+    triangle: int = 3
+    square: int = 2
     l1: int = 4
     r1: int = 5
     teleop_toggle: int = 9

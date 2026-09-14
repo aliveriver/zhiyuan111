@@ -87,6 +87,11 @@ class TeleopStateMachine:
         if self.state == TeleopState.ESTOP:
             self.state = TeleopState.IDLE
 
+    def enter_idle(self) -> None:
+        """Stop accepting motion until the operator explicitly re-arms teleop."""
+        if self.state != TeleopState.ESTOP:
+            self.state = TeleopState.IDLE
+
     def _zero(self) -> TeleopOutput:
         return TeleopOutput(self.state, mode=None, hand_actions=())
 
@@ -114,7 +119,7 @@ class TeleopStateMachine:
             if active and not self._previous_triggers[name]:
                 actions.append(action)
             self._previous_triggers[name] = active
-        return actions
+        return actions[:1]
 
     def _update_trigger_edges(self, sample: JoySample) -> None:
         for name, index in (("lt", self.mapping.lt), ("rt", self.mapping.rt)):
