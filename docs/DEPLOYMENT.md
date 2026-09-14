@@ -11,6 +11,11 @@ uv run x2-ps5-input-test
 
 ## 机器人侧
 
+注意：官方蓝牙配对会把 DualSense HID 设备绑定到 PC1（`10.0.1.40`），由
+`soc0_rc` 在 PC1 内部消费；现场没有 `/joy` 或公开的 PS5 输入 Topic。PC2 上运行的
+`pygame` 读取器只能看到配对到 PC2 的手柄。不要在 PC1 启动本项目来绕过这一限制；如需
+保留官方配对方式，应先向现场确认可用的输入转发接口。
+
 机器人使用 ROS 2 Humble。将源码部署到 PC2（`10.0.1.41`）的
 `/agibot/data/home/agi/x2_ps5_teleop`，并以官方 `run` 用户启动，确保
 AimDK 消息包和输入设备权限可用：

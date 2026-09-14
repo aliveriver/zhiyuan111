@@ -57,6 +57,21 @@ uv run x2-ps5-input-test
 
 ## X2 ROS 2 模式
 
+### 关于官方蓝牙遥控器连接
+
+如果按 X2 官方设置将 DualSense 直接与机器人配对，手柄会出现在运控计算机
+PC1（`10.0.1.40`）的 Linux 输入设备中（例如 `DualSense Wireless Controller` / `js0`）。
+官方 `soc0_rc` 节点会在 PC1 内部读取这些事件并直接发布底盘速度；现场 ROS 图没有
+`/joy` 或公开的 PS5 按键 Topic。因此部署在 PC2 的本程序不能从这条原生蓝牙链路读取
+摇杆和按键，`pygame joysticks=0` 在这种情况下是预期结果。
+
+本程序有两种互斥的输入方案：
+
+1. 将手柄作为 Linux HID 配对到运行本程序的 PC2，由 `pygame` 读取，再向 ROS 发布官方
+   AimDK 速度/手部命令。
+2. 保持官方“手柄连接机器人”方式，但需要 AgiBot 提供 `soc0_rc` 的公开输入转发
+   Topic/API；当前图中尚未发现该接口，不能凭经验猜测或在 PC1 运行二开程序代替它。
+
 ```bash
 # 在 PC2（10.0.1.41）上以官方 `run` 服务用户运行。`run` 用户拥有
 # AimDK 运行时，并具有机器人输入设备的访问权限。

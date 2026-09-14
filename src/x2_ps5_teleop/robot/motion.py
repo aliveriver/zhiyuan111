@@ -143,8 +143,12 @@ class X2RosRobot(RobotInterface):
     def _verify_hand_type(self) -> None:
         future = self.hand_type_client.call_async(self._srv[2].Request())
         response = self._wait_for_result(future, "查询灵巧手类型")
-        left = response.left_hands_type.value
-        right = response.right_hands_type.value
+        # GetHandType uses singular field names in the X2 AimDK service:
+        # ``left_hand`` and ``right_hand``.  Keep the access explicit so an
+        # interface mismatch fails during startup instead of later on a live
+        # hand command.
+        left = response.left_hand.value
+        right = response.right_hand.value
         if left != 1 or right != 1:
             raise RuntimeError(f"需要左右 NIMBLE_HANDS(value=1)，实际为 left={left}, right={right}")
 
