@@ -143,6 +143,16 @@ PY
 fi
 
 cd "$PROJECT_DIR"
+echo "Python: $PYTHON_BIN"
+"$PYTHON_BIN" - <<'PY'
+import sys
+import x2_ps5_teleop
+import x2_ps5_teleop.bridge.server as bridge_server
+print(f"桥接源码: {bridge_server.__file__}")
+print(f"协议版本: {bridge_server.PROTOCOL_VERSION}")
+print(f"Python 模块路径: {x2_ps5_teleop.__file__}")
+print(f"sys.path[0:3]: {sys.path[0:3]}")
+PY
 echo "项目目录: $PROJECT_DIR"
 echo "控制后端: $ROBOT"
 echo "监听地址: ws://$HOST:$PORT"

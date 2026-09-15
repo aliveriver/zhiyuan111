@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import logging
 import math
 import time
 from typing import Any
@@ -16,6 +17,9 @@ from typing import Any
 from ..core import HandAction, Mode
 from ..robot.motion import RobotInterface
 from ..teleop.state_machine import TeleopState
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class BridgeError(ValueError):
@@ -96,6 +100,7 @@ class BridgeController:
             self.last_command_at = None
             self.state = TeleopState.IDLE
             self.armed = False
+            LOGGER.info("控制连接注册 session=%s client=%s replaced=%s", session_id, client_id, old_session or "-")
             return old_session
 
     async def disconnect(self, session_id: str) -> bool:
@@ -108,6 +113,7 @@ class BridgeController:
             self.owner_session = None
             self.owner_client = None
             self.last_command_at = None
+            LOGGER.info("控制连接断开 session=%s", session_id)
             return True
 
     async def snapshot(self, now: float | None = None) -> BridgeSnapshot:
@@ -126,6 +132,8 @@ class BridgeController:
             if sequence <= self.last_sequence:
                 raise BridgeError("stale_sequence", "消息序列号必须严格递增")
             self.last_sequence = sequence
+            if message_type not in ("velocity", "heartbeat"):
+                LOGGER.info("收到控制消息 session=%s type=%s sequence=%s", session_id, message_type, sequence)
 
             if message_type == "heartbeat":
                 self._touch_locked(now)
@@ -139,11 +147,22 @@ class BridgeController:
                 self._preset_locked(message.get("action"), now)
             elif message_type == "hand_target":
                 self._hand_target_locked(message, now)
+            elif message_type in ("hand_params", "hand_command"):
+                LOGGER.warning("收到兼容手部消息类型 %s，按 hand_target 处理", message_type)
+                # Accept the field names used by early mobile builds while
+                # keeping one validated path for the robot command.
+                normalized = dict(message)
+                if "joints" not in normalized:
+                    normalized["joints"] = normalized.get("parameters", normalized.get("commands"))
+                if "side" not in normalized:
+                    normalized["side"] = normalized.get("hand", normalized.get("hand_side"))
+                self._hand_target_locked(normalized, now)
             elif message_type == "estop":
                 self._estop_locked()
             elif message_type == "clear_estop":
                 self._clear_estop_locked()
             else:
+                LOGGER.warning("拒绝未知消息类型 session=%s type=%r sequence=%s", session_id, message_type, sequence)
                 raise BridgeError("unknown_type", f"不支持的消息类型: {message_type!r}")
 
             return self._snapshot_locked(now).as_dict()
@@ -232,11 +251,17 @@ class BridgeController:
             "open": HandAction.RT,
             "victory": HandAction.L1,
             "thumbs_up": HandAction.LT,
+            "握紧": HandAction.R1,
+            "张开": HandAction.RT,
+            "比个耶": HandAction.L1,
+            "点个赞": HandAction.LT,
         }
         try:
             action = action_by_name[str(action_value)]
         except KeyError as exc:
+            LOGGER.warning("拒绝未知预设 action=%r，支持=%s", action_value, ",".join(sorted(action_by_name)))
             raise BridgeError("invalid_preset", "不支持的预设动作") from exc
+        LOGGER.info("执行手部预设 action=%s mapped=%s", action_value, action.value)
         self._stop_locked()
         self.robot.hand_action(action)
         self.state = TeleopState.IDLE
@@ -265,6 +290,7 @@ class BridgeController:
             clean.append((index, *values))
         self._stop_locked()
         self.robot.hand_target(str(side), clean)
+        LOGGER.info("执行手部参数 side=%s joints=%d", side, len(clean))
         self.state = TeleopState.IDLE
         self.armed = False
         self.last_command_at = None

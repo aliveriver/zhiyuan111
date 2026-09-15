@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import secrets
+import sys
 from typing import Any
 
 from .controller import BridgeController, BridgeError
@@ -13,6 +15,7 @@ from ..robot.motion import MockRobot, X2RosRobot
 from ..settings import DEFAULT_CONFIG_PATH, load_settings
 
 PROTOCOL_VERSION = 1
+LOGGER = logging.getLogger(__name__)
 
 
 class TeleopBridgeServer:
@@ -24,10 +27,12 @@ class TeleopBridgeServer:
 
     async def handler(self, websocket) -> None:
         session_id = secrets.token_urlsafe(18)
+        LOGGER.info("WebSocket 新连接 session=%s remote=%s", session_id, getattr(websocket, "remote_address", "-"))
         try:
             raw = await asyncio.wait_for(websocket.recv(), timeout=5.0)
             hello = self._decode(raw)
             if hello.get("type") != "hello" or hello.get("protocol_version") != PROTOCOL_VERSION:
+                LOGGER.warning("拒绝 hello session=%s payload=%s", session_id, hello)
                 raise BridgeError("invalid_hello", "首帧必须是 protocol_version=1 的 hello")
             client_id = hello.get("client_id")
             old_session = await self.controller.register(session_id, client_id)
@@ -36,7 +41,11 @@ class TeleopBridgeServer:
             if old_session is not None and old_session in self.channels:
                 await self._send_error(old_session, "replaced", "同一设备建立了新连接")
                 await self.channels[old_session].close(code=4001, reason="replaced")
-            await self._send(session_id, {"type": "hello_ack", "protocol_version": PROTOCOL_VERSION})
+            await self._send(session_id, {
+                "type": "hello_ack",
+                "protocol_version": PROTOCOL_VERSION,
+                "capabilities": ["velocity", "mode", "preset", "hand_target", "hand_params", "hand_command"],
+            })
             await self._broadcast()
             async for raw in websocket:
                 try:
@@ -45,8 +54,10 @@ class TeleopBridgeServer:
                     await self._send(session_id, {"type": "ack", "sequence": message.get("sequence"), "state": state})
                     await self._broadcast()
                 except BridgeError as exc:
+                    LOGGER.warning("控制消息失败 session=%s code=%s message=%s", session_id, exc.code, exc.message)
                     await self._send_error(session_id, exc.code, exc.message)
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    LOGGER.exception("解析控制消息失败 session=%s", session_id)
                     await self._send_error(session_id, "invalid_message", str(exc))
         except BridgeError as exc:
             await self._send_raw(websocket, {"type": "error", "code": exc.code, "message": exc.message})
@@ -54,6 +65,7 @@ class TeleopBridgeServer:
         except (asyncio.TimeoutError, json.JSONDecodeError, TypeError, ValueError):
             await websocket.close(code=1008, reason="invalid hello")
         finally:
+            LOGGER.info("WebSocket 关闭 session=%s", session_id)
             self.channels.pop(session_id, None)
             self.send_locks.pop(session_id, None)
             if await self.controller.disconnect(session_id):
@@ -107,6 +119,7 @@ async def serve(args) -> None:
         raise RuntimeError("桥接服务需要 websockets 依赖，请先运行 uv sync") from exc
 
     settings = load_settings(args.config)
+    LOGGER.info("桥接启动 protocol=%s python=%s module=%s", PROTOCOL_VERSION, sys.executable, __file__)
     if args.robot == "mock":
         robot = MockRobot(__import__("sys").stdout)
     else:
@@ -125,7 +138,7 @@ async def serve(args) -> None:
     watchdog = asyncio.create_task(server.watchdog_loop())
     try:
         async with websockets.serve(server.handler, args.host, args.port, max_size=16 * 1024, ping_interval=20):
-            print(f"WebSocket bridge listening on ws://{args.host}:{args.port}", flush=True)
+            LOGGER.info("WebSocket bridge listening on ws://%s:%s robot=%s source=%s", args.host, args.port, args.robot, args.source)
             await asyncio.Future()
     finally:
         watchdog.cancel()
@@ -133,6 +146,11 @@ async def serve(args) -> None:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
     parser = argparse.ArgumentParser(description="AgiBot X2 手机 WebSocket 遥操作桥接服务")
     parser.add_argument("--robot", choices=("mock", "x2"), default="mock")
     parser.add_argument("--host", default="0.0.0.0")

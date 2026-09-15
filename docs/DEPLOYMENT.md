@@ -45,6 +45,11 @@ npm start
 `ws://<PC2局域网IP>:8765`。先验证 App 的连接、解锁、摇杆、急停和断连停车，确认
 Mock 终端只打印预期命令后，才能切换真机后端。
 
+启动后日志应包含 `桥接源码: .../src/x2_ps5_teleop/bridge/server.py`。如果 App 仍提示
+“不支持的消息类型/预设动作”，说明 8765 端口仍由旧桥接进程占用；先停止旧进程，再用
+`./scripts/start_mobile_bridge.sh --robot x2 --host 0.0.0.0 --port 8765` 启动，不要直接
+运行系统中旧的 `x2-teleop-bridge` 可执行文件。
+
 ### 真机桥接启动
 
 真机桥接必须运行在 PC2（`10.0.1.41`）或已确认能访问 AimDK ROS 图的外部上位机，

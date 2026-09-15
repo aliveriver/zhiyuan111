@@ -134,8 +134,12 @@ export default function App() {
 
   const send = useCallback((payload: Record<string, unknown>, withSequence = true) => {
     const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      if (payload.type !== 'velocity' && payload.type !== 'heartbeat') console.warn('[teleop] send skipped: socket not open', payload.type);
+      return false;
+    }
     const message = withSequence ? { ...payload, sequence: ++sequenceRef.current } : payload;
+    if (payload.type !== 'velocity' && payload.type !== 'heartbeat') console.info('[teleop] send', message);
     socket.send(JSON.stringify(message));
     return true;
   }, []);
@@ -183,6 +187,8 @@ export default function App() {
         try {
           const message = JSON.parse(event.data) as {
             type?: string;
+            protocol_version?: number;
+            capabilities?: string[];
             state?: string | BridgeState;
             armed?: boolean;
             source?: string;
@@ -191,7 +197,9 @@ export default function App() {
             code?: string;
             message?: string;
           };
-          if (message.type === 'state') {
+          if (message.type === 'hello_ack') {
+            console.info('[teleop] bridge hello_ack', message.protocol_version, message.capabilities || []);
+          } else if (message.type === 'state') {
             const next: BridgeState = {
               state: typeof message.state === 'string' ? message.state : 'IDLE',
               armed: Boolean(message.armed),
@@ -205,6 +213,7 @@ export default function App() {
             setBridgeState(message.state);
             armedRef.current = message.state.armed;
           } else if (message.type === 'error') {
+            console.warn('[teleop] bridge error', message.code, message.message);
             setStatusText(message.message || message.code || '服务端错误');
             if (message.code === 'busy' || message.code === 'replaced' || message.code === 'not_owner') closeConnection(false);
           }

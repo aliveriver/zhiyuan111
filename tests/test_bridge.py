@@ -103,6 +103,20 @@ def test_preset_stops_and_returns_to_idle():
     run(scenario())
 
 
+def test_mobile_preset_aliases_are_accepted():
+    robot = RecordingRobot()
+    controller = BridgeController(robot)
+
+    async def scenario():
+        await controller.register("s1", "phone")
+        await controller.handle("s1", {"type": "arm", "enabled": True, "sequence": 1}, now=1)
+        state = await controller.handle("s1", {"type": "preset", "action": "握紧", "sequence": 2}, now=1.1)
+        assert state["state"] == "IDLE"
+        assert robot.calls[-1] == ("hand", HandAction.R1)
+
+    run(scenario())
+
+
 def test_hand_target_is_validated_and_returns_to_idle():
     robot = RecordingRobot()
     controller = BridgeController(robot)
