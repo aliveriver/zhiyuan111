@@ -84,7 +84,11 @@ if [[ "$ROBOT" == "x2" ]]; then
     [[ "$(id -un)" == "run" ]] || die "真机模式必须使用官方 run 用户，当前用户: $(id -un)"
     [[ -f "$COBRIDGE_SETUP" ]] || die "找不到 AimDK 环境: $COBRIDGE_SETUP"
     # shellcheck disable=SC1090
+    # 官方 setup.bash 会读取未定义的 COLCON_TRACE；临时关闭 nounset，
+    # 避免污染或修改官方环境脚本。
+    set +u
     source "$COBRIDGE_SETUP"
+    set -u
 fi
 
 export PYTHONPATH="$PROJECT_DIR/src:${PYTHONPATH:-}"
@@ -97,13 +101,15 @@ else
 fi
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "找不到 Python: $PYTHON_BIN"
 
-"$PYTHON_BIN" - <<'PY' || die "当前 Python 环境缺少 websockets，请先安装 websockets>=12"
+"$PYTHON_BIN" - <<'PY' || die "当前 Python 环境缺少 websockets 或 numpy，请先在项目环境执行 uv sync"
 import websockets
+import numpy
 print(f"websockets {websockets.__version__}")
+print(f"numpy {numpy.__version__}")
 PY
 
 if [[ "$ROBOT" == "x2" ]]; then
-    "$PYTHON_BIN" - <<'PY' || die "当前 Python 环境缺少 rclpy 或 aimdk_msgs，请确认已加载 cobridge 环境"
+    "$PYTHON_BIN" - <<'PY' || die "当前 Python 环境缺少 rclpy、aimdk_msgs 或其依赖，请确认已加载 cobridge 环境并执行 uv sync"
 import rclpy
 import aimdk_msgs
 print("ROS 2 / aimdk_msgs ok")

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "可在本地测试的 AgiBot X2 PS5 遥操作核心"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["pygame-ce>=2.5", "websockets>=12.0"]
+dependencies = ["numpy>=1.24", "pygame-ce>=2.5", "websockets>=12.0"]
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
