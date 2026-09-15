@@ -82,6 +82,14 @@ class BridgeController:
         self.last_sequence = -1
         self.last_command_at: float | None = None
         self.lock = asyncio.Lock()
+        # Trajectories are intentionally kept in the bridge process.  A frame
+        # is a protocol command plus the elapsed time from recording start;
+        # this keeps recordings hardware agnostic and makes them portable
+        # between MockRobot and the ROS backend.
+        self.trajectories: dict[str, list[dict[str, Any]]] = {}
+        self.recording_name: str | None = None
+        self.recording_frames: list[dict[str, Any]] = []
+        self.recording_started_at: float | None = None
 
     async def register(self, session_id: str, client_id: str) -> str | None:
         """注册控制连接，返回需要被关闭的同 client 旧会话。"""
@@ -157,6 +165,20 @@ class BridgeController:
                 if "side" not in normalized:
                     normalized["side"] = normalized.get("hand", normalized.get("hand_side"))
                 self._hand_target_locked(normalized, now)
+            elif message_type == "trajectory_list":
+                return {"trajectories": self._trajectory_list_locked(), **self._snapshot_locked(now).as_dict()}
+            elif message_type == "trajectory_record_start":
+                self._trajectory_record_start_locked(message, now)
+            elif message_type == "trajectory_record_stop":
+                self._trajectory_record_stop_locked(now)
+            elif message_type == "trajectory_save":
+                self._trajectory_save_locked(message)
+            elif message_type == "trajectory_delete":
+                self._trajectory_delete_locked(message)
+            elif message_type == "trajectory_rename":
+                self._trajectory_rename_locked(message)
+            elif message_type == "trajectory_play":
+                await self._trajectory_play_locked(message, now)
             elif message_type == "estop":
                 self._estop_locked()
             elif message_type == "clear_estop":
@@ -165,7 +187,7 @@ class BridgeController:
                 LOGGER.warning("拒绝未知消息类型 session=%s type=%r sequence=%s", session_id, message_type, sequence)
                 raise BridgeError("unknown_type", f"不支持的消息类型: {message_type!r}")
 
-            return self._snapshot_locked(now).as_dict()
+        return self._snapshot_locked(now).as_dict()
 
     async def watchdog(self, now: float | None = None) -> bool:
         """检查控制心跳；返回是否发生了状态变化。"""
@@ -223,6 +245,7 @@ class BridgeController:
         values = tuple(self._finite_number(message.get(key), key) for key in ("forward", "lateral", "angular"))
         clamped = tuple(max(-limit, min(limit, value)) for value, limit in zip(values, self.velocity_limits))
         self.robot.move(*clamped)
+        self._record_frame_locked({"type": "velocity", "forward": clamped[0], "lateral": clamped[1], "angular": clamped[2]}, now)
         self.last_command_at = now
 
     def _mode_locked(self, mode_value: Any, now: float) -> None:
@@ -233,6 +256,7 @@ class BridgeController:
         except ValueError as exc:
             raise BridgeError("invalid_mode", "不支持的运动模式") from exc
         self.robot.set_mode(mode)
+        self._record_frame_locked({"type": "mode", "mode": mode.value}, now)
         self.last_command_at = now
 
     def _preset_locked(self, action_value: Any, now: float) -> None:
@@ -264,9 +288,12 @@ class BridgeController:
         LOGGER.info("执行手部预设 action=%s mapped=%s", action_value, action.value)
         self._stop_locked()
         self.robot.hand_action(action)
-        self.state = TeleopState.IDLE
-        self.armed = False
-        self.last_command_at = None
+        self._record_frame_locked({"type": "preset", "action": str(action_value)}, now)
+        # A preset is a momentary hand command; keep the teleop lease alive so
+        # the operator can immediately issue another action.
+        self.state = TeleopState.TELEOP
+        self.armed = True
+        self.last_command_at = now
 
     def _hand_target_locked(self, message: dict[str, Any], now: float) -> None:
         if not self.armed or self.state != TeleopState.TELEOP:
@@ -280,9 +307,17 @@ class BridgeController:
             if not isinstance(joint, dict):
                 raise BridgeError("invalid_hand_target", "关节参数格式无效")
             values = []
+            limits = {
+                "position": (-1.0, 1.0),
+                "velocity": (0.0, 1.0),
+                "acceleration": (0.0, 10.0),
+                "deceleration": (0.0, 10.0),
+                "effort": (-1.0, 1.0),
+            }
             for key in ("position", "velocity", "acceleration", "deceleration", "effort"):
                 value = self._finite_number(joint.get(key), key)
-                if abs(value) > 10:
+                low, high = limits[key]
+                if value < low or value > high:
                     raise BridgeError("invalid_hand_target", f"{key} 超出安全范围")
                 values.append(value)
             if joint.get("index", index) != index:
@@ -291,9 +326,91 @@ class BridgeController:
         self._stop_locked()
         self.robot.hand_target(str(side), clean)
         LOGGER.info("执行手部参数 side=%s joints=%d", side, len(clean))
-        self.state = TeleopState.IDLE
-        self.armed = False
-        self.last_command_at = None
+        self._record_frame_locked({"type": "hand_target", "side": str(side), "joints": joints}, now)
+        self.state = TeleopState.TELEOP
+        self.armed = True
+        self.last_command_at = now
+
+    def _trajectory_list_locked(self) -> list[dict[str, Any]]:
+        return [{"name": name, "frames": len(frames)} for name, frames in sorted(self.trajectories.items())]
+
+    def _trajectory_record_start_locked(self, message: dict[str, Any], now: float) -> None:
+        if not self.armed or self.state != TeleopState.TELEOP:
+            raise BridgeError("not_armed", "请先进入 TELEOP")
+        name = str(message.get("name", "")).strip()
+        if not name or len(name) > 80:
+            raise BridgeError("invalid_trajectory", "轨迹名称不能为空且不能超过 80 个字符")
+        self.recording_name = name
+        self.recording_frames = []
+        self.recording_started_at = now
+
+    def _trajectory_record_stop_locked(self, now: float) -> None:
+        if self.recording_name is None:
+            raise BridgeError("not_recording", "当前没有正在录制的轨迹")
+        self.trajectories[self.recording_name] = list(self.recording_frames)
+        self.recording_name = None
+        self.recording_frames = []
+        self.recording_started_at = None
+
+    def _trajectory_save_locked(self, message: dict[str, Any]) -> None:
+        name = str(message.get("name", "")).strip()
+        frames = message.get("frames")
+        if not name or len(name) > 80 or not isinstance(frames, list):
+            raise BridgeError("invalid_trajectory", "需要有效名称和 frames 数组")
+        if len(frames) > 10000:
+            raise BridgeError("invalid_trajectory", "轨迹帧数不能超过 10000")
+        clean: list[dict[str, Any]] = []
+        for frame in frames:
+            if not isinstance(frame, dict) or not isinstance(frame.get("type"), str):
+                raise BridgeError("invalid_trajectory", "轨迹帧格式无效")
+            clean.append(dict(frame))
+        self.trajectories[name] = clean
+
+    def _trajectory_delete_locked(self, message: dict[str, Any]) -> None:
+        name = str(message.get("name", "")).strip()
+        if name not in self.trajectories:
+            raise BridgeError("trajectory_not_found", "轨迹不存在")
+        del self.trajectories[name]
+
+    def _trajectory_rename_locked(self, message: dict[str, Any]) -> None:
+        old = str(message.get("old_name", "")).strip()
+        new = str(message.get("new_name", "")).strip()
+        if old not in self.trajectories:
+            raise BridgeError("trajectory_not_found", "轨迹不存在")
+        if not new or len(new) > 80 or (new != old and new in self.trajectories):
+            raise BridgeError("invalid_trajectory", "新名称无效或已存在")
+        self.trajectories[new] = self.trajectories.pop(old)
+
+    async def _trajectory_play_locked(self, message: dict[str, Any], now: float) -> None:
+        if not self.armed or self.state != TeleopState.TELEOP:
+            raise BridgeError("not_armed", "请先进入 TELEOP")
+        name = str(message.get("name", "")).strip()
+        frames = self.trajectories.get(name)
+        if frames is None:
+            raise BridgeError("trajectory_not_found", "轨迹不存在")
+        previous_t = 0
+        for frame in frames:
+            target_t = frame.get("t_ms", previous_t)
+            if isinstance(target_t, (int, float)) and target_t >= previous_t:
+                await asyncio.sleep(min(10.0, max(0.0, (float(target_t) - previous_t) / 1000.0)))
+                previous_t = float(target_t)
+            kind = frame.get("type")
+            if kind == "velocity":
+                self._velocity_locked(frame, now)
+            elif kind == "mode":
+                self._mode_locked(frame.get("mode"), now)
+            elif kind == "preset":
+                self._preset_locked(frame.get("action"), now)
+            elif kind == "hand_target":
+                self._hand_target_locked(frame, now)
+        self.last_command_at = now
+
+    def _record_frame_locked(self, payload: dict[str, Any], now: float) -> None:
+        if self.recording_name is None or self.recording_started_at is None:
+            return
+        frame = dict(payload)
+        frame["t_ms"] = max(0, int((now - self.recording_started_at) * 1000))
+        self.recording_frames.append(frame)
 
     def _estop_locked(self) -> None:
         self._stop_locked()

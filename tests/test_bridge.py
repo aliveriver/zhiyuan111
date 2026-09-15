@@ -88,7 +88,7 @@ def test_watchdog_stops_and_estop_requires_clear_then_rearm():
     run(scenario())
 
 
-def test_preset_stops_and_returns_to_idle():
+def test_preset_keeps_teleop_armed_for_next_action():
     robot = RecordingRobot()
     controller = BridgeController(robot)
 
@@ -96,8 +96,8 @@ def test_preset_stops_and_returns_to_idle():
         await controller.register("s1", "phone")
         await controller.handle("s1", {"type": "arm", "enabled": True, "sequence": 1}, now=1)
         state = await controller.handle("s1", {"type": "preset", "action": "right_wave", "sequence": 2}, now=1.1)
-        assert state["state"] == "IDLE"
-        assert not state["armed"]
+        assert state["state"] == "TELEOP"
+        assert state["armed"]
         assert robot.calls[-2:] == [("stop",), ("hand", HandAction.RT)]
 
     run(scenario())
@@ -111,13 +111,14 @@ def test_mobile_preset_aliases_are_accepted():
         await controller.register("s1", "phone")
         await controller.handle("s1", {"type": "arm", "enabled": True, "sequence": 1}, now=1)
         state = await controller.handle("s1", {"type": "preset", "action": "握紧", "sequence": 2}, now=1.1)
-        assert state["state"] == "IDLE"
+        assert state["state"] == "TELEOP"
+        assert state["armed"]
         assert robot.calls[-1] == ("hand", HandAction.R1)
 
     run(scenario())
 
 
-def test_hand_target_is_validated_and_returns_to_idle():
+def test_hand_target_is_validated_and_keeps_teleop_armed():
     robot = RecordingRobot()
     controller = BridgeController(robot)
 
@@ -126,9 +127,30 @@ def test_hand_target_is_validated_and_returns_to_idle():
         await controller.handle("s1", {"type": "arm", "enabled": True, "sequence": 1}, now=1)
         joints = [{"index": index, "position": 0.1, "velocity": 0.2, "acceleration": 0.3, "deceleration": 0.4, "effort": 0.0} for index in range(10)]
         state = await controller.handle("s1", {"type": "hand_target", "side": "left", "joints": joints, "sequence": 2}, now=1.1)
-        assert state["state"] == "IDLE"
-        assert not state["armed"]
+        assert state["state"] == "TELEOP"
+        assert state["armed"]
         assert robot.calls[-2][0] == "stop"
         assert robot.calls[-1][0:2] == ("hand_target", "left")
+
+    run(scenario())
+
+
+def test_trajectory_record_list_rename_delete_and_playback():
+    robot = RecordingRobot()
+    controller = BridgeController(robot)
+
+    async def scenario():
+        await controller.register("s1", "phone")
+        await controller.handle("s1", {"type": "arm", "enabled": True, "sequence": 1}, now=1)
+        await controller.handle("s1", {"type": "trajectory_record_start", "name": "抓取", "sequence": 2}, now=1)
+        await controller.handle("s1", {"type": "preset", "action": "open", "sequence": 3}, now=1.1)
+        await controller.handle("s1", {"type": "trajectory_record_stop", "sequence": 4}, now=1.2)
+        listing = await controller.handle("s1", {"type": "trajectory_list", "sequence": 5}, now=1.2)
+        assert listing["trajectories"] == [{"name": "抓取", "frames": 1}]
+        await controller.handle("s1", {"type": "trajectory_rename", "old_name": "抓取", "new_name": "抓取2", "sequence": 6}, now=1.2)
+        await controller.handle("s1", {"type": "trajectory_play", "name": "抓取2", "sequence": 7}, now=1.2)
+        assert robot.calls[-1] == ("hand", HandAction.RT)
+        await controller.handle("s1", {"type": "trajectory_delete", "name": "抓取2", "sequence": 8}, now=1.2)
+        assert (await controller.handle("s1", {"type": "trajectory_list", "sequence": 9}, now=1.2))["trajectories"] == []
 
     run(scenario())

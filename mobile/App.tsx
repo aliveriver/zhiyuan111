@@ -23,6 +23,15 @@ type BridgeState = {
   robot_connected: boolean;
 };
 type JoystickValue = { x: number; y: number };
+type TrajectoryInfo = { name: string; frames: number };
+type HandField = 'position' | 'velocity' | 'acceleration' | 'deceleration' | 'effort';
+const HAND_FIELDS: Array<{ key: HandField; label: string; range: string; hint: string }> = [
+  { key: 'position', label: '位置', range: '−1～1', hint: '关节目标位置' },
+  { key: 'velocity', label: '速度', range: '0～1', hint: '运动速度' },
+  { key: 'acceleration', label: '加速度', range: '0～10', hint: '启动加速度' },
+  { key: 'deceleration', label: '减速度', range: '0～10', hint: '停止减速度' },
+  { key: 'effort', label: '力度', range: '−1～1', hint: '执行力度' },
+];
 
 const DEFAULT_URL = 'ws://10.0.1.41:8765';
 const MODES = [
@@ -113,12 +122,16 @@ export default function App() {
   const [rightStick, setRightStick] = useState<JoystickValue>({ x: 0, y: 0 });
   const leftStickRef = useRef<JoystickValue>({ x: 0, y: 0 });
   const rightStickRef = useRef<JoystickValue>({ x: 0, y: 0 });
-  const [page, setPage] = useState<'move' | 'hand'>('move');
+  const [page, setPage] = useState<'move' | 'hand' | 'trajectory'>('move');
   const [handSide, setHandSide] = useState<'left' | 'right'>('left');
   const [handTargets, setHandTargets] = useState<Record<'left' | 'right', Array<{ position: string; velocity: string; acceleration: string; deceleration: string; effort: string }>>>({
     left: Array.from({ length: 10 }, () => ({ position: '0', velocity: '0.1', acceleration: '0', deceleration: '0', effort: '0' })),
     right: Array.from({ length: 10 }, () => ({ position: '0', velocity: '0.1', acceleration: '0', deceleration: '0', effort: '0' })),
   });
+  const [trajectories, setTrajectories] = useState<TrajectoryInfo[]>([]);
+  const [trajectoryName, setTrajectoryName] = useState('我的轨迹');
+  const [selectedTrajectory, setSelectedTrajectory] = useState('');
+  const [recording, setRecording] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const socketTokenRef = useRef(0);
   const sequenceRef = useRef(0);
@@ -194,6 +207,7 @@ export default function App() {
             source?: string;
             last_command_age_ms?: number | null;
             robot_connected?: boolean;
+            trajectories?: TrajectoryInfo[];
             code?: string;
             message?: string;
           };
@@ -212,6 +226,11 @@ export default function App() {
           } else if (message.type === 'ack' && message.state && typeof message.state === 'object') {
             setBridgeState(message.state);
             armedRef.current = message.state.armed;
+            if (Array.isArray((message.state as unknown as { trajectories?: TrajectoryInfo[] }).trajectories)) {
+              setTrajectories((message.state as unknown as { trajectories: TrajectoryInfo[] }).trajectories);
+            }
+          } else if (message.type === 'trajectory_list' && Array.isArray(message.trajectories)) {
+            setTrajectories(message.trajectories);
           } else if (message.type === 'error') {
             console.warn('[teleop] bridge error', message.code, message.message);
             setStatusText(message.message || message.code || '服务端错误');
@@ -304,6 +323,32 @@ export default function App() {
     send({ type: 'hand_target', side: handSide, joints });
   };
 
+  const refreshTrajectories = useCallback(() => send({ type: 'trajectory_list' }), [send]);
+  const startRecording = () => {
+    const name = trajectoryName.trim() || '未命名轨迹';
+    if (send({ type: 'trajectory_record_start', name })) setRecording(true);
+  };
+  const stopRecording = () => {
+    if (send({ type: 'trajectory_record_stop' })) {
+      setRecording(false);
+      refreshTrajectories();
+    }
+  };
+  const deleteTrajectory = (name: string) => {
+    if (send({ type: 'trajectory_delete', name })) {
+      if (selectedTrajectory === name) setSelectedTrajectory('');
+      refreshTrajectories();
+    }
+  };
+  const renameTrajectory = (name: string) => {
+    const next = trajectoryName.trim();
+    if (next && next !== name && send({ type: 'trajectory_rename', old_name: name, new_name: next })) {
+      setSelectedTrajectory(next);
+      refreshTrajectories();
+    }
+  };
+  const playTrajectory = (name: string) => send({ type: 'trajectory_play', name });
+
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="light" />
@@ -328,6 +373,7 @@ export default function App() {
         <View style={styles.tabs}>
           <Pressable style={[styles.tab, page === 'move' && styles.tabActive]} onPress={() => setPage('move')}><Text style={styles.tabText}>移动控制</Text></Pressable>
           <Pressable style={[styles.tab, page === 'hand' && styles.tabActive]} onPress={() => setPage('hand')}><Text style={styles.tabText}>灵巧手参数</Text></Pressable>
+          <Pressable style={[styles.tab, page === 'trajectory' && styles.tabActive]} onPress={() => { setPage('trajectory'); refreshTrajectories(); }}><Text style={styles.tabText}>轨迹录制</Text></Pressable>
         </View>
 
         {page === 'move' ? <View style={[styles.mainRow, compactLayout && styles.mainRowCompact]}>
@@ -352,7 +398,7 @@ export default function App() {
             </View>
             <Text style={styles.hint}>松开摇杆立即发零速度；切后台或断网会自动停车。</Text>
           </View>
-        </View> : <View style={styles.handPanel}>
+        </View> : page === 'hand' ? <View style={styles.handPanel}>
           <View style={styles.armRow}>
             <Pressable style={[styles.armButton, bridgeState.armed && styles.disarmButton]} onPress={arm}>
               <Text style={styles.armText}>{bridgeState.armed ? '退出 TELEOP' : '进入 TELEOP'}</Text>
@@ -362,12 +408,35 @@ export default function App() {
           <View style={styles.sideSwitch}>
             {(['left', 'right'] as const).map((side) => <Pressable key={side} style={[styles.sideButton, handSide === side && styles.sideButtonActive]} onPress={() => setHandSide(side)}><Text style={styles.sideText}>{side === 'left' ? '左手' : '右手'}</Text></Pressable>)}
           </View>
-          <Text style={styles.handHint}>每只手 10 个命令槽。填写位置、速度和力度后发送单帧。</Text>
+          <Text style={styles.handHint}>每只手 10 个命令槽。每个输入框标注了安全范围和用途；填写后发送单帧，发送完成仍保持已解锁。</Text>
           {handTargets[handSide].map((joint, index) => <View key={index} style={styles.jointRow}>
             <Text style={styles.jointName}>关节 {index + 1}</Text>
-            {(['position', 'velocity', 'acceleration', 'deceleration', 'effort'] as const).map((key) => <TextInput key={key} value={joint[key]} onChangeText={(value) => updateHandTarget(index, key, value)} keyboardType="numeric" style={styles.jointInput} placeholder={key === 'position' ? '位置' : key === 'velocity' ? '速度' : key === 'acceleration' ? '加速度' : key === 'deceleration' ? '减速度' : '力度'} placeholderTextColor="#6d7885" />)}
+            {HAND_FIELDS.map((field) => <View key={field.key} style={styles.fieldCell}>
+              <Text style={styles.fieldLabel}>{field.label} · {field.range}</Text>
+              <TextInput value={joint[field.key]} onChangeText={(value) => updateHandTarget(index, field.key, value)} keyboardType="numeric" style={styles.jointInput} placeholder={field.hint} placeholderTextColor="#6d7885" />
+              <Text style={styles.fieldHint}>{field.hint}</Text>
+            </View>)}
           </View>)}
           <Pressable style={styles.sendHandButton} onPress={sendHandTarget}><Text style={styles.armText}>发送单帧</Text></Pressable>
+        </View> : <View style={styles.handPanel}>
+          <View style={styles.armRow}>
+            <Pressable style={[styles.armButton, bridgeState.armed && styles.disarmButton]} onPress={arm}><Text style={styles.armText}>{bridgeState.armed ? '退出 TELEOP' : '进入 TELEOP'}</Text></Pressable>
+            <Pressable style={styles.estopButton} onPress={emergencyStop}><Text style={styles.estopText}>急停</Text></Pressable>
+          </View>
+          <Text style={styles.sectionLabel}>轨迹名称</Text>
+          <TextInput value={trajectoryName} onChangeText={setTrajectoryName} style={styles.urlInput} placeholder="例如：抓取测试" placeholderTextColor="#6d7885" />
+          <View style={styles.trajectoryActions}>
+            <Pressable style={[styles.recordButton, recording && styles.stopRecordButton]} onPress={recording ? stopRecording : startRecording}><Text style={styles.armText}>{recording ? '停止并保存录制' : '开始录制'}</Text></Pressable>
+            <Pressable style={styles.connectButton} onPress={refreshTrajectories}><Text style={styles.connectText}>刷新列表</Text></Pressable>
+          </View>
+          <Text style={styles.handHint}>{recording ? '录制中：移动、模式、预设和灵巧手单帧命令都会按时间顺序记录。' : '录制前先进入 TELEOP；播放前也需要保持已解锁。'}</Text>
+          {trajectories.length === 0 ? <Text style={styles.emptyText}>暂无轨迹</Text> : trajectories.map((trajectory) => <View key={trajectory.name} style={styles.trajectoryRow}>
+            <View style={styles.trajectoryMeta}><Text style={styles.trajectoryTitle}>{trajectory.name}</Text><Text style={styles.fieldHint}>{trajectory.frames} 帧</Text></View>
+            <Pressable style={styles.smallButton} onPress={() => playTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>播放</Text></Pressable>
+            <Pressable style={styles.smallButton} onPress={() => { setSelectedTrajectory(trajectory.name); setTrajectoryName(trajectory.name); }}><Text style={styles.smallButtonText}>编辑</Text></Pressable>
+            <Pressable style={styles.deleteButton} onPress={() => deleteTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>删除</Text></Pressable>
+            {selectedTrajectory === trajectory.name && <Pressable style={styles.smallButton} onPress={() => renameTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>保存名称</Text></Pressable>}
+          </View>)}
         </View>}
       </ScrollView>
     </SafeAreaView>
@@ -419,8 +488,21 @@ const styles = StyleSheet.create({
   sideButtonActive: { backgroundColor: '#295d8a' },
   sideText: { color: '#fff', fontWeight: '700' },
   handHint: { color: '#8796a3', fontSize: 12, marginVertical: 12 },
-  jointRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
-  jointName: { color: '#c9d5df', width: 58, fontSize: 12 },
+  jointRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginBottom: 10 },
+  jointName: { color: '#c9d5df', width: 58, fontSize: 12, paddingTop: 22 },
+  fieldCell: { flex: 1, minWidth: 0 },
+  fieldLabel: { color: '#9eafbd', fontSize: 10, marginBottom: 3 },
+  fieldHint: { color: '#687987', fontSize: 10, marginTop: 2 },
   jointInput: { flex: 1, minWidth: 0, color: '#e7edf3', backgroundColor: '#111a23', borderColor: '#273644', borderWidth: 1, borderRadius: 7, paddingHorizontal: 8, paddingVertical: 8, fontSize: 12 },
   sendHandButton: { backgroundColor: '#267558', borderRadius: 8, alignItems: 'center', justifyContent: 'center', minHeight: 44, marginTop: 8 },
+  trajectoryActions: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  recordButton: { flex: 1, backgroundColor: '#267558', borderRadius: 8, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+  stopRecordButton: { backgroundColor: '#8d6330' },
+  emptyText: { color: '#687987', textAlign: 'center', paddingVertical: 28 },
+  trajectoryRow: { flexDirection: 'row', alignItems: 'center', gap: 7, borderTopWidth: 1, borderTopColor: '#22303c', paddingVertical: 10 },
+  trajectoryMeta: { flex: 1 },
+  trajectoryTitle: { color: '#e7edf3', fontWeight: '700', fontSize: 14 },
+  smallButton: { backgroundColor: '#295d8a', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 8 },
+  deleteButton: { backgroundColor: '#8d3e48', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 8 },
+  smallButtonText: { color: '#fff', fontSize: 11, fontWeight: '700' },
 });

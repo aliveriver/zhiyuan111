@@ -44,7 +44,7 @@ class TeleopBridgeServer:
             await self._send(session_id, {
                 "type": "hello_ack",
                 "protocol_version": PROTOCOL_VERSION,
-                "capabilities": ["velocity", "mode", "preset", "hand_target", "hand_params", "hand_command"],
+                "capabilities": ["velocity", "mode", "preset", "hand_target", "hand_params", "hand_command", "trajectory"],
             })
             await self._broadcast()
             async for raw in websocket:
