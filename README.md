@@ -67,7 +67,7 @@ uv run x2-ps5-input-test
 ```powershell
 uv sync
 uv run pytest
-uv run x2-teleop-bridge --robot mock --host 0.0.0.0 --port 8765
+./scripts/start_mobile_bridge.sh --robot mock --host 0.0.0.0 --port 8765
 cd mobile
 npm install
 npm start
@@ -88,7 +88,7 @@ source /agibot/software/cobridge/setup.bash
 export PYTHONPATH=$PWD/src:/agibot/software/common/local/lib/python3.10/dist-packages:/agibot/software/ec/local/lib/python3.10/dist-packages:$PYTHONPATH
 export AMENT_PREFIX_PATH=/agibot/software/common:/agibot/software/ec:$AMENT_PREFIX_PATH
 export LD_LIBRARY_PATH=/agibot/software/common/lib:/agibot/software/ec/lib:$LD_LIBRARY_PATH
-x2-teleop-bridge --robot x2 --host 0.0.0.0 --port 8765 --source mobile_app
+./scripts/start_mobile_bridge.sh --robot x2 --host 0.0.0.0 --port 8765 --source mobile_app
 ```
 
 启动后 App 初始为 `IDLE`。确认物理急停已释放、周围无人且机器人状态稳定，再点击

@@ -11,6 +11,10 @@ uv run x2-ps5-input-test
 
 ## 手机 App 与 PC2 桥接
 
+仓库提供了启动脚本 `scripts/start_mobile_bridge.sh`。脚本默认使用 Mock 后端，只有显式
+指定 `--robot x2` 才会加载 AimDK 环境并连接真机；脚本也会拒绝在已知 PC1 地址
+`10.0.1.40` 上启动。
+
 ### 网络要求
 
 手机和 PC2 必须位于同一局域网，且 Wi-Fi AP 允许客户端互访。桥接服务默认监听
@@ -23,7 +27,8 @@ uv run x2-ps5-input-test
 cd /path/to/x2_ps5_teleop
 uv sync
 uv run pytest
-uv run x2-teleop-bridge --robot mock --host 0.0.0.0 --port 8765
+chmod +x scripts/start_mobile_bridge.sh
+./scripts/start_mobile_bridge.sh --robot mock
 ```
 
 电脑端另开终端启动 Expo：
@@ -50,7 +55,15 @@ source /agibot/software/cobridge/setup.bash
 export PYTHONPATH=$PWD/src:/agibot/software/common/local/lib/python3.10/dist-packages:/agibot/software/ec/local/lib/python3.10/dist-packages:$PYTHONPATH
 export AMENT_PREFIX_PATH=/agibot/software/common:/agibot/software/ec:$AMENT_PREFIX_PATH
 export LD_LIBRARY_PATH=/agibot/software/common/lib:/agibot/software/ec/lib:$LD_LIBRARY_PATH
-x2-teleop-bridge --robot x2 --host 0.0.0.0 --port 8765 --source mobile_app
+./scripts/start_mobile_bridge.sh --robot x2 --host 0.0.0.0 --port 8765 --source mobile_app
+```
+
+脚本会自动设置 `PYTHONPATH`，并检查当前用户是否为 `run`、`websockets`、`rclpy` 和
+`aimdk_msgs` 是否可导入。若 `cobridge/setup.bash` 不在默认路径，可使用：
+
+```bash
+./scripts/start_mobile_bridge.sh --robot x2 \
+  --cobridge /实际路径/cobridge/setup.bash
 ```
 
 从 `agi` 会话启动时使用 `sudo -iu run` 包装上述命令。桥接服务启动后为 `IDLE`，不会
