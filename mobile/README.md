@@ -20,6 +20,18 @@ npm run typecheck
 npm start
 ```
 
+生成可直接安装到 Android 手机上的 APK：
+
+```powershell
+npx eas-cli build --platform android --profile preview
+```
+
+构建完成后使用 EAS 输出的下载链接或二维码安装 APK。首次构建需要登录 Expo 账号：
+
+```powershell
+npx eas-cli login
+```
+
 用 Expo Go 或 Development Build 打开项目。手机和电脑连接同一局域网，在 App 的地址栏
 输入 `ws://<电脑局域网IP>:8765`，点击“连接”。Mock 模式会在服务端终端打印运动、模式
 和预设动作，不会控制真机。

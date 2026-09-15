@@ -18,6 +18,11 @@
           "NSAllowsLocalNetworking": true
         }
       }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "861139a6-e04a-42ca-88cf-149ce1f605a5"
+      }
     }
   }
 }

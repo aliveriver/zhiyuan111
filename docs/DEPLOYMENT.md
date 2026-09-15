@@ -82,6 +82,19 @@ App 以 20 Hz 发送速度帧。服务端使用单控制租约、递增序列号
 Expo Go；需要稳定部署时使用 Development Build 或 EAS Build。构建后仍需在现场网络中
 确认手机可以访问 PC2 的 TCP `8765` 端口。
 
+生成 Android APK：
+
+```powershell
+cd mobile
+npx eas-cli login
+npx eas-cli build --platform android --profile preview
+```
+
+项目中的 `mobile/eas.json` 已将 `preview` 配置为 APK。安装打包后的 App 后，不再需要
+Expo Go 或 Metro 的 `8081` 端口；App 仍需在界面中填写 PC2 的 WebSocket 地址，例如
+`ws://10.0.1.41:8765`。EAS 构建本身需要访问 Expo 云服务，但打包后的 App 控制连接
+只需要手机能够访问 PC2 的 `8765` 端口。
+
 ## 机器人侧
 
 注意：官方蓝牙配对会把 DualSense HID 设备绑定到 PC1（`10.0.1.40`），由
