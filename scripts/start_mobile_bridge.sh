@@ -88,7 +88,13 @@ if [[ "$ROBOT" == "x2" ]]; then
 fi
 
 export PYTHONPATH="$PROJECT_DIR/src:${PYTHONPATH:-}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+if [[ -n "${PYTHON_BIN:-}" ]]; then
+    :
+elif [[ -x "$PROJECT_DIR/.venv/bin/python" ]]; then
+    PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
+else
+    PYTHON_BIN="python3"
+fi
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "找不到 Python: $PYTHON_BIN"
 
 "$PYTHON_BIN" - <<'PY' || die "当前 Python 环境缺少 websockets，请先安装 websockets>=12"
