@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # 启动 X2 手机 WebSocket 桥接服务。
-# 默认启动 Mock；只有显式传入 --robot x2 才会连接真机。
+# PC2/run 自动连接真机，其它环境默认使用 Mock；可用 --robot 显式覆盖。
 
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
-ROBOT="mock"
+# On the robot PC2, a bare invocation should start the real backend. On any
+# other host keep the safer Mock default; --robot always overrides detection.
+ROBOT="auto"
 HOST="0.0.0.0"
 PORT="8765"
 TIMEOUT="0.4"
@@ -21,7 +23,7 @@ usage() {
   ./scripts/start_mobile_bridge.sh [选项]
 
 选项:
-  --robot mock|x2       后端类型，默认 mock；真机必须显式使用 x2
+  --robot mock|x2       后端类型，默认按主机自动判断（PC2/run=x2，其它=mock）
   --host ADDRESS        WebSocket 监听地址，默认 0.0.0.0
   --port PORT           WebSocket 端口，默认 8765
   --timeout SECONDS     控制帧超时，默认 0.4
@@ -67,11 +69,6 @@ while (($# > 0)); do
     esac
 done
 
-case "$ROBOT" in
-    mock|x2) ;;
-    *) die "--robot 只能是 mock 或 x2" ;;
-esac
-
 [[ -f "$CONFIG" ]] || die "配置文件不存在: $CONFIG"
 
 # 已知 PC1 是运控计算机，禁止在上面运行二开桥接程序。
@@ -79,6 +76,18 @@ LOCAL_ADDRESSES="$(hostname -I 2>/dev/null || true)"
 if [[ $LOCAL_ADDRESSES == *10.0.1.40* ]]; then
     die "检测到 PC1 地址 10.0.1.40；请在 PC2（通常为 10.0.1.41）运行此脚本"
 fi
+
+if [[ "$ROBOT" == "auto" ]]; then
+    if [[ $LOCAL_ADDRESSES == *10.0.1.41* && "$(id -un)" == "run" ]]; then
+        ROBOT="x2"
+    else
+        ROBOT="mock"
+    fi
+fi
+case "$ROBOT" in
+    mock|x2) ;;
+    *) die "--robot 只能是 mock 或 x2" ;;
+esac
 
 if [[ "$ROBOT" == "x2" ]]; then
     [[ "$(id -un)" == "run" ]] || die "真机模式必须使用官方 run 用户，当前用户: $(id -un)"
@@ -89,6 +98,23 @@ if [[ "$ROBOT" == "x2" ]]; then
     set +u
     source "$COBRIDGE_SETUP"
     set -u
+    # The factory setup script does not consistently export the Python and
+    # AMENT paths needed by aimdk_msgs on every image, so add the known local
+    # workspaces when they exist.
+    # Use the complete common AimDK message package. The ec workspace carries
+    # a reduced package with the same import name and must not shadow it.
+    ROS_PYTHON="/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages"
+    PYTHONPATH="/agibot/software/common/local/lib/python3.10/dist-packages:$ROS_PYTHON:$PROJECT_DIR/src"
+    for path in /agibot/software/common /agibot/software/ec; do
+        [[ -d "$path" ]] && AMENT_PREFIX_PATH="$path:${AMENT_PREFIX_PATH:-}"
+    done
+    for path in /agibot/software/ec/lib /agibot/software/common/lib; do
+        [[ -d "$path" ]] && LD_LIBRARY_PATH="$path:${LD_LIBRARY_PATH:-}"
+    done
+    if [[ -f /agibot/software/common/lib/libaimdk_msgs__rosidl_generator_py.so ]]; then
+        LD_PRELOAD="/agibot/software/common/lib/libaimdk_msgs__rosidl_generator_py.so${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
+    export PYTHONPATH AMENT_PREFIX_PATH LD_LIBRARY_PATH LD_PRELOAD
 fi
 
 export PYTHONPATH="$PROJECT_DIR/src:${PYTHONPATH:-}"

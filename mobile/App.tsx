@@ -5,9 +5,11 @@ import {
   PanResponder,
   Pressable,
   SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
@@ -94,6 +96,8 @@ function Joystick({
 }
 
 export default function App() {
+  const { width } = useWindowDimensions();
+  const compactLayout = width < 720;
   const [url, setUrl] = useState(DEFAULT_URL);
   const [statusText, setStatusText] = useState('未连接');
   const [bridgeState, setBridgeState] = useState<BridgeState>({
@@ -256,7 +260,7 @@ export default function App() {
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="light" />
-      <View style={styles.container}>
+      <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
         <View style={styles.header}>
           <View>
             <Text style={styles.title}>X2 MOBILE TELEOP</Text>
@@ -274,12 +278,12 @@ export default function App() {
           <Text style={styles.stateText}>{bridgeState.state}{bridgeState.armed ? ' · 已解锁' : ' · 未解锁'}</Text>
         </View>
 
-        <View style={styles.mainRow}>
+        <View style={[styles.mainRow, compactLayout && styles.mainRowCompact]}>
           <View style={styles.controlPanel}>
             <Joystick label="前进 / 横移" value={leftStick} onChange={setLeft} />
             <Joystick label="旋转" value={rightStick} onChange={setRight} />
           </View>
-          <View style={styles.actionPanel}>
+          <View style={[styles.actionPanel, compactLayout && styles.actionPanelCompact]}>
             <View style={styles.armRow}>
               <Pressable style={[styles.armButton, bridgeState.armed && styles.disarmButton]} onPress={arm}>
                 <Text style={styles.armText}>{bridgeState.armed ? '退出 TELEOP' : '进入 TELEOP'}</Text>
@@ -297,32 +301,34 @@ export default function App() {
             <Text style={styles.hint}>松开摇杆立即发零速度；切后台或断网会自动停车。</Text>
           </View>
         </View>
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#0b1118' },
-  container: { flex: 1, paddingHorizontal: 24, paddingVertical: 18 },
+  container: { flexGrow: 1, paddingHorizontal: 20, paddingVertical: 16 },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   title: { color: '#f3f7fb', fontSize: 23, fontWeight: '800', letterSpacing: 1.6 },
   subtitle: { color: '#82909d', marginTop: 3, fontSize: 12 },
   statusPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#141e28', borderRadius: 18, paddingHorizontal: 14, paddingVertical: 9 },
   statusDot: { width: 8, height: 8, borderRadius: 4, marginRight: 8 },
   statusText: { color: '#d8e0e8', fontSize: 13 },
-  connectionRow: { flexDirection: 'row', alignItems: 'center', marginTop: 16, gap: 10 },
+  connectionRow: { flexDirection: 'row', alignItems: 'center', marginTop: 14, gap: 8 },
   urlInput: { flex: 1, color: '#e7edf3', backgroundColor: '#111a23', borderColor: '#273644', borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9, fontSize: 13 },
   connectButton: { backgroundColor: '#295d8a', paddingHorizontal: 18, paddingVertical: 10, borderRadius: 8 },
   connectText: { color: '#fff', fontWeight: '700' },
-  stateText: { color: '#9fabb8', width: 145, textAlign: 'right', fontSize: 13 },
-  mainRow: { flex: 1, flexDirection: 'row', marginTop: 18, gap: 22 },
-  controlPanel: { flex: 0.95, backgroundColor: '#101923', borderColor: '#1d2a37', borderWidth: 1, borderRadius: 16, flexDirection: 'row', justifyContent: 'space-evenly', alignItems: 'center' },
+  stateText: { color: '#9fabb8', minWidth: 128, textAlign: 'right', fontSize: 13 },
+  mainRow: { flex: 1, flexDirection: 'row', marginTop: 16, gap: 16, minHeight: 390 },
+  mainRowCompact: { flexDirection: 'column', minHeight: 0 },
+  controlPanel: { flex: 0.95, backgroundColor: '#101923', borderColor: '#1d2a37', borderWidth: 1, borderRadius: 12, flexDirection: 'row', justifyContent: 'space-evenly', alignItems: 'center', minHeight: 236, paddingVertical: 18 },
   joystickColumn: { alignItems: 'center' },
   joystickLabel: { color: '#8f9dab', fontSize: 12, marginBottom: 10 },
   joystick: { backgroundColor: '#172431', borderRadius: 100, borderWidth: 1, borderColor: '#2b4154' },
   knob: { position: 'absolute', borderRadius: 100, backgroundColor: '#387fae', borderWidth: 5, borderColor: '#5ca9d2' },
-  actionPanel: { flex: 1.4, backgroundColor: '#101923', borderColor: '#1d2a37', borderWidth: 1, borderRadius: 16, padding: 16 },
+  actionPanel: { flex: 1.4, backgroundColor: '#101923', borderColor: '#1d2a37', borderWidth: 1, borderRadius: 12, padding: 16 },
+  actionPanelCompact: { flex: 0, padding: 14 },
   armRow: { flexDirection: 'row', gap: 10 },
   armButton: { flex: 1, backgroundColor: '#267558', borderRadius: 9, alignItems: 'center', justifyContent: 'center', minHeight: 46 },
   disarmButton: { backgroundColor: '#8d6330' },
@@ -331,8 +337,8 @@ const styles = StyleSheet.create({
   estopText: { color: '#fff', fontWeight: '900', fontSize: 17 },
   sectionLabel: { color: '#8392a0', fontSize: 12, marginTop: 17, marginBottom: 8 },
   buttonGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  modeButton: { backgroundColor: '#1a2e3f', borderRadius: 8, paddingHorizontal: 14, paddingVertical: 10 },
-  presetButton: { backgroundColor: '#332b48', borderRadius: 8, paddingHorizontal: 14, paddingVertical: 10 },
+  modeButton: { backgroundColor: '#1a2e3f', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 11, minWidth: 76, alignItems: 'center', flexGrow: 1 },
+  presetButton: { backgroundColor: '#332b48', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 11, minWidth: 118, alignItems: 'center', flexGrow: 1 },
   modeText: { color: '#dce7ef', fontSize: 13, fontWeight: '600' },
   hint: { color: '#667684', fontSize: 11, marginTop: 'auto', paddingTop: 12 },
 });

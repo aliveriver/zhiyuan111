@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sys
 from typing import TextIO
 
 from ..core import HandAction, Mode
@@ -64,6 +65,11 @@ class X2RosRobot(RobotInterface):
         preset_actions=None,
     ):
         try:
+            common_aimdk = "/agibot/software/common/local/lib/python3.10/dist-packages"
+            ec_aimdk = "/agibot/software/ec/local/lib/python3.10/dist-packages"
+            sys.path[:] = [path for path in sys.path if "/agibot/software/ec/" not in path]
+            if common_aimdk not in sys.path:
+                sys.path.insert(0, common_aimdk)
             import rclpy
             from aimdk_msgs.msg import (
                 McLocomotionVelocity,
@@ -143,14 +149,21 @@ class X2RosRobot(RobotInterface):
     def _verify_hand_type(self) -> None:
         future = self.hand_type_client.call_async(self._srv[2].Request())
         response = self._wait_for_result(future, "查询灵巧手类型")
-        # GetHandType uses singular field names in the X2 AimDK service:
-        # ``left_hand`` and ``right_hand``.  Keep the access explicit so an
-        # interface mismatch fails during startup instead of later on a live
-        # hand command.
-        left = response.left_hand.value
-        right = response.right_hand.value
+        # AimDK images have shipped both singular and plural response field
+        # names. Read the installed interface explicitly so startup validation
+        # works across those versions instead of failing on the first command.
+        left = self._hand_type_value(response, "left")
+        right = self._hand_type_value(response, "right")
         if left != 1 or right != 1:
             raise RuntimeError(f"需要左右 NIMBLE_HANDS(value=1)，实际为 left={left}, right={right}")
+
+    @staticmethod
+    def _hand_type_value(response, side: str) -> int:
+        for field in (f"{side}_hand", f"{side}_hands_type"):
+            value = getattr(response, field, None)
+            if value is not None:
+                return int(value.value)
+        raise RuntimeError("GetHandType 响应缺少左右手类型字段")
 
     def move(self, linear_x: float, linear_y: float, angular_z: float) -> None:
         if not self._rclpy.ok():

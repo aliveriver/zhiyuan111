@@ -11,8 +11,9 @@ uv run x2-ps5-input-test
 
 ## 手机 App 与 PC2 桥接
 
-仓库提供了启动脚本 `scripts/start_mobile_bridge.sh`。脚本默认使用 Mock 后端，只有显式
-指定 `--robot x2` 才会加载 AimDK 环境并连接真机；脚本也会拒绝在已知 PC1 地址
+仓库提供了启动脚本 `scripts/start_mobile_bridge.sh`。脚本会自动判断后端：在
+`10.0.1.41` 且当前用户为官方 `run` 时默认启动 `x2` 真机后端；其它主机默认使用
+Mock。可以用 `--robot mock` 或 `--robot x2` 显式覆盖，脚本也会拒绝在已知 PC1 地址
 `10.0.1.40` 上启动。
 
 ### 网络要求
@@ -49,14 +50,18 @@ Mock 终端只打印预期命令后，才能切换真机后端。
 真机桥接必须运行在 PC2（`10.0.1.41`）或已确认能访问 AimDK ROS 图的外部上位机，
 禁止在 PC1（`10.0.1.40`）运行。以官方 `run` 用户加载环境：
 
+SSH 登录 PC2 后，直接执行下面的命令即可启动真机后端；脚本会自行加载 `cobridge` 和
+AimDK 环境，不需要手工 `source` 或导出环境变量：
+
 ```bash
-cd /agibot/data/home/agi/x2_ps5_teleop
-source /agibot/software/cobridge/setup.bash
-export PYTHONPATH=$PWD/src:/agibot/software/common/local/lib/python3.10/dist-packages:/agibot/software/ec/local/lib/python3.10/dist-packages:$PYTHONPATH
-export AMENT_PREFIX_PATH=/agibot/software/common:/agibot/software/ec:$AMENT_PREFIX_PATH
-export LD_LIBRARY_PATH=/agibot/software/common/lib:/agibot/software/ec/lib:$LD_LIBRARY_PATH
-./scripts/start_mobile_bridge.sh --robot x2 --host 0.0.0.0 --port 8765 --source mobile_app
+cd ~/zhiyuan111-main
+./scripts/start_mobile_bridge.sh
 ```
+
+等价的显式写法是 `./scripts/start_mobile_bridge.sh --robot x2 --host 0.0.0.0 --port 8765
+--source mobile_app`。服务以前台方式运行，终端中断（Ctrl-C）会先发送零速度再退出；
+需要后台运行时可使用 `nohup ./scripts/start_mobile_bridge.sh >~/x2-teleop-bridge.log 2>&1 &`
+并用 `ss -ltn | grep 8765` 检查监听状态，停止时执行 `kill <PID>`。
 
 脚本会自动设置 `PYTHONPATH`，并检查当前用户是否为 `run`、`websockets`、`numpy`、`rclpy` 和
 `aimdk_msgs` 是否可导入。`aimdk_msgs` 的 Python 文件依赖 `numpy`，所以真机模式必须先

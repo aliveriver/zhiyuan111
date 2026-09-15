@@ -79,8 +79,9 @@ npm start
 
 ### 真机使用前提
 
-真机模式只能在 PC2（通常为 `10.0.1.41`）运行，不能在 PC1（`10.0.1.40`）运行。必须
-以官方 `run` 用户加载 AimDK 环境后启动：
+真机模式只能在 PC2（通常为 `10.0.1.41`）运行，不能在 PC1（`10.0.1.40`）运行。以官方
+`run` 用户登录 PC2 后，进入项目目录直接执行 `./scripts/start_mobile_bridge.sh` 即可；
+脚本会自动加载 AimDK 环境并选择 `x2` 后端。显式命令如下：
 
 ```bash
 cd /agibot/data/home/agi/x2_ps5_teleop
@@ -90,6 +91,9 @@ export AMENT_PREFIX_PATH=/agibot/software/common:/agibot/software/ec:$AMENT_PREF
 export LD_LIBRARY_PATH=/agibot/software/common/lib:/agibot/software/ec/lib:$LD_LIBRARY_PATH
 ./scripts/start_mobile_bridge.sh --robot x2 --host 0.0.0.0 --port 8765 --source mobile_app
 ```
+
+在 PC2（`10.0.1.41`）以 `run` 用户执行时，脚本会自动选择 `x2` 真机后端；其它主机
+默认选择 Mock。需要显式指定时可追加 `--robot mock` 或 `--robot x2`。
 
 启动后 App 初始为 `IDLE`。确认物理急停已释放、周围无人且机器人状态稳定，再点击
 “进入 TELEOP”。松开摇杆、退出 App、切后台、断开网络或超过 0.4 秒未收到控制帧时，
