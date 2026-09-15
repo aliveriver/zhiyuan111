@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "X2 Mobile Teleop",
+    "slug": "x2-mobile-teleop",
+    "version": "1.0.0",
+    "orientation": "landscape",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "android": {
+      "package": "com.local.x2mobileteleop",
+      "usesCleartextTraffic": true
+    },
+    "ios": {
+      "bundleIdentifier": "com.local.x2mobileteleop",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "连接同一局域网中的 X2 PC2 遥操作桥接服务。",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    }
+  }
+}

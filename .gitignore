@@ -3,3 +3,5 @@
 .pytest_cache/
 __pycache__/
 *.py[cod]
+mobile/node_modules/
+mobile/.expo/

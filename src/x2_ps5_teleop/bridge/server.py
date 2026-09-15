@@ -1,0 +1,148 @@
+"""PC2 上运行的手机 WebSocket 桥接服务。"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import secrets
+from typing import Any
+
+from .controller import BridgeController, BridgeError
+from ..robot.motion import MockRobot, X2RosRobot
+from ..settings import DEFAULT_CONFIG_PATH, load_settings
+
+PROTOCOL_VERSION = 1
+
+
+class TeleopBridgeServer:
+    def __init__(self, controller: BridgeController):
+        self.controller = controller
+        self.channels: dict[str, Any] = {}
+        self.send_locks: dict[str, asyncio.Lock] = {}
+        self.broadcast_lock = asyncio.Lock()
+
+    async def handler(self, websocket) -> None:
+        session_id = secrets.token_urlsafe(18)
+        try:
+            raw = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+            hello = self._decode(raw)
+            if hello.get("type") != "hello" or hello.get("protocol_version") != PROTOCOL_VERSION:
+                raise BridgeError("invalid_hello", "首帧必须是 protocol_version=1 的 hello")
+            client_id = hello.get("client_id")
+            old_session = await self.controller.register(session_id, client_id)
+            self.channels[session_id] = websocket
+            self.send_locks[session_id] = asyncio.Lock()
+            if old_session is not None and old_session in self.channels:
+                await self._send_error(old_session, "replaced", "同一设备建立了新连接")
+                await self.channels[old_session].close(code=4001, reason="replaced")
+            await self._send(session_id, {"type": "hello_ack", "protocol_version": PROTOCOL_VERSION})
+            await self._broadcast()
+            async for raw in websocket:
+                try:
+                    message = self._decode(raw)
+                    state = await self.controller.handle(session_id, message)
+                    await self._send(session_id, {"type": "ack", "sequence": message.get("sequence"), "state": state})
+                    await self._broadcast()
+                except BridgeError as exc:
+                    await self._send_error(session_id, exc.code, exc.message)
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    await self._send_error(session_id, "invalid_message", str(exc))
+        except BridgeError as exc:
+            await self._send_raw(websocket, {"type": "error", "code": exc.code, "message": exc.message})
+            await websocket.close(code=1008, reason=exc.code)
+        except (asyncio.TimeoutError, json.JSONDecodeError, TypeError, ValueError):
+            await websocket.close(code=1008, reason="invalid hello")
+        finally:
+            self.channels.pop(session_id, None)
+            self.send_locks.pop(session_id, None)
+            if await self.controller.disconnect(session_id):
+                await self._broadcast()
+
+    async def watchdog_loop(self) -> None:
+        while True:
+            await asyncio.sleep(0.05)
+            if await self.controller.watchdog():
+                await self._broadcast()
+
+    async def _broadcast(self) -> None:
+        state = (await self.controller.snapshot()).as_dict()
+        for session_id in list(self.channels):
+            try:
+                await self._send(session_id, state)
+            except Exception:
+                pass
+
+    async def _send_error(self, session_id: str, code: str, message: str) -> None:
+        if session_id in self.channels:
+            await self._send(session_id, {"type": "error", "code": code, "message": message})
+
+    async def _send(self, session_id: str, payload: dict[str, Any]) -> None:
+        websocket = self.channels.get(session_id)
+        if websocket is None:
+            return
+        async with self.send_locks[session_id]:
+            await websocket.send(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+    async def _send_raw(self, websocket, payload: dict[str, Any]) -> None:
+        try:
+            await websocket.send(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _decode(raw: str | bytes) -> dict[str, Any]:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        message = json.loads(raw)
+        if not isinstance(message, dict):
+            raise TypeError("WebSocket 消息必须是 JSON 对象")
+        return message
+
+
+async def serve(args) -> None:
+    try:
+        import websockets
+    except ImportError as exc:  # pragma: no cover - 安装依赖后由入口执行
+        raise RuntimeError("桥接服务需要 websockets 依赖，请先运行 uv sync") from exc
+
+    settings = load_settings(args.config)
+    if args.robot == "mock":
+        robot = MockRobot(__import__("sys").stdout)
+    else:
+        robot = X2RosRobot(source=args.source, preset_actions=settings.presets)
+    controller = BridgeController(
+        robot,
+        source=args.source,
+        timeout=args.timeout,
+        velocity_limits=(
+            settings.mapping.max_linear_x,
+            settings.mapping.max_linear_y,
+            settings.mapping.max_angular_z,
+        ),
+    )
+    server = TeleopBridgeServer(controller)
+    watchdog = asyncio.create_task(server.watchdog_loop())
+    try:
+        async with websockets.serve(server.handler, args.host, args.port, max_size=16 * 1024, ping_interval=20):
+            print(f"WebSocket bridge listening on ws://{args.host}:{args.port}", flush=True)
+            await asyncio.Future()
+    finally:
+        watchdog.cancel()
+        await controller.close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="AgiBot X2 手机 WebSocket 遥操作桥接服务")
+    parser.add_argument("--robot", choices=("mock", "x2"), default="mock")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--timeout", type=float, default=0.4)
+    parser.add_argument("--source", default="mobile_app")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
+    args = parser.parse_args()
+    asyncio.run(serve(args))
+
+
+if __name__ == "__main__":
+    main()

@@ -9,6 +9,66 @@ uv run python demo/teleop_demo.py --robot mock
 uv run x2-ps5-input-test
 ```
 
+## 手机 App 与 PC2 桥接
+
+### 网络要求
+
+手机和 PC2 必须位于同一局域网，且 Wi-Fi AP 允许客户端互访。桥接服务默认监听
+`0.0.0.0:8765`；手机访问 PC2 的局域网地址，例如 `ws://10.0.1.41:8765`。不要把
+8765 端口暴露到公网，也不要让手机直接连接 PC1 或 ROS 2。
+
+首次部署建议先运行 Mock 后端：
+
+```bash
+cd /path/to/x2_ps5_teleop
+uv sync
+uv run pytest
+uv run x2-teleop-bridge --robot mock --host 0.0.0.0 --port 8765
+```
+
+电脑端另开终端启动 Expo：
+
+```powershell
+cd mobile
+npm install
+npm run typecheck
+npm start
+```
+
+手机用 Expo Go 或 Development Build 打开项目，在 App 中填写
+`ws://<PC2局域网IP>:8765`。先验证 App 的连接、解锁、摇杆、急停和断连停车，确认
+Mock 终端只打印预期命令后，才能切换真机后端。
+
+### 真机桥接启动
+
+真机桥接必须运行在 PC2（`10.0.1.41`）或已确认能访问 AimDK ROS 图的外部上位机，
+禁止在 PC1（`10.0.1.40`）运行。以官方 `run` 用户加载环境：
+
+```bash
+cd /agibot/data/home/agi/x2_ps5_teleop
+source /agibot/software/cobridge/setup.bash
+export PYTHONPATH=$PWD/src:/agibot/software/common/local/lib/python3.10/dist-packages:/agibot/software/ec/local/lib/python3.10/dist-packages:$PYTHONPATH
+export AMENT_PREFIX_PATH=/agibot/software/common:/agibot/software/ec:$AMENT_PREFIX_PATH
+export LD_LIBRARY_PATH=/agibot/software/common/lib:/agibot/software/ec/lib:$LD_LIBRARY_PATH
+x2-teleop-bridge --robot x2 --host 0.0.0.0 --port 8765 --source mobile_app
+```
+
+从 `agi` 会话启动时使用 `sudo -iu run` 包装上述命令。桥接服务启动后为 `IDLE`，不会
+自动解锁。首次真机测试顺序为：确认 ROS 服务可用 → 手机连接并保持 IDLE → 释放物理急停
+并确认机器人稳定 → 进入 TELEOP → 极低速短时移动 → 退出 TELEOP 并确认零速度。
+
+### App 生命周期与并发安全
+
+App 以 20 Hz 发送速度帧。服务端使用单控制租约、递增序列号和 0.4 秒看门狗：不同手机
+不能同时控制；同一手机的新连接会使旧连接失效；重复/乱序帧会拒绝；超时、断连、切后台
+和连接替换都会停车。急停必须明确清除后重新解锁。
+
+### 移动端构建
+
+`mobile/app.json` 已配置横屏、本地网络权限和 Android 明文局域网 WebSocket。开发期可用
+Expo Go；需要稳定部署时使用 Development Build 或 EAS Build。构建后仍需在现场网络中
+确认手机可以访问 PC2 的 TCP `8765` 端口。
+
 ## 机器人侧
 
 注意：官方蓝牙配对会把 DualSense HID 设备绑定到 PC1（`10.0.1.40`），由

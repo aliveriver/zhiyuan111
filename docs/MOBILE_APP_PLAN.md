@@ -210,3 +210,102 @@ effort
 6. 增加预设手部动作，逐个测试并确认动作完成后回到 `IDLE`。
 7. 读取 `/aima/hal/joint/hand/state`，确认关节顺序、单位和限位后，再开发直接调整滑块。
 
+## 当前实现
+
+仓库现在包含：
+
+- `src/x2_ps5_teleop/bridge/`：PC2 WebSocket 桥接服务，入口为 `x2-teleop-bridge`；
+- `mobile/`：Expo React Native TypeScript App；
+- `tests/test_bridge.py`：桥接并发、序列号、看门狗、急停和预设动作测试。
+
+桥接服务采用单控制租约。同一时刻只允许一个 `client_id`，同一设备建立新连接时旧
+WebSocket 会被关闭；服务端用连接 session id 再检查一次控制权，因此旧连接的延迟帧
+不会覆盖新连接。速度帧由服务端按 0.12 / 0.08 / 0.15 的上限再次限幅，连续控制
+超过 0.4 秒未收到帧会发布零速度并进入 `TIMEOUT`。
+
+本地联调：
+
+```powershell
+uv sync
+uv run pytest
+uv run x2-teleop-bridge --robot mock
+cd mobile
+npm install
+npm start
+```
+
+手机与 PC2 同网后，将 App 中地址改为 `ws://PC2地址:8765`。首轮只使用 `--robot mock`
+或只观察桥接状态，不要直接进行真机移动测试。
+
+## 手机 App 使用流程
+
+### 本地 Mock 联调
+
+在 PC2 或开发电脑上启动桥接服务：
+
+```powershell
+uv sync
+uv run pytest
+uv run x2-teleop-bridge --robot mock --host 0.0.0.0 --port 8765
+```
+
+另开终端启动 Expo：
+
+```powershell
+cd mobile
+npm install
+npm run typecheck
+npm start
+```
+
+使用 Expo Go 或 Development Build 打开 App。手机与桥接服务电脑连接同一个允许客户端
+互访的 Wi-Fi，在 App 地址栏输入 `ws://<电脑局域网IP>:8765`，点击“连接”。Mock 模式
+不会连接机器人，只会在桥接服务终端打印 `MOVE`、模式和手部动作事件。
+
+### 真机部署
+
+真机桥接服务只能部署到 PC2（`10.0.1.41`）或已确认能访问 ROS 图的外部上位机，不能
+部署到 PC1（`10.0.1.40`）。使用官方 `run` 用户和 AimDK 环境：
+
+```bash
+cd /agibot/data/home/agi/x2_ps5_teleop
+source /agibot/software/cobridge/setup.bash
+export PYTHONPATH=$PWD/src:/agibot/software/common/local/lib/python3.10/dist-packages:/agibot/software/ec/local/lib/python3.10/dist-packages:$PYTHONPATH
+export AMENT_PREFIX_PATH=/agibot/software/common:/agibot/software/ec:$AMENT_PREFIX_PATH
+export LD_LIBRARY_PATH=/agibot/software/common/lib:/agibot/software/ec/lib:$LD_LIBRARY_PATH
+x2-teleop-bridge --robot x2 --host 0.0.0.0 --port 8765 --source mobile_app
+```
+
+手机填写 `ws://10.0.1.41:8765` 或现场实际的 PC2 局域网地址。第一次真机测试前应先
+完成 Mock 联调，并确认：手机能访问 PC2 的 TCP 8765、PC2 能发现 AimDK ROS 图、物理
+急停有人值守、机器人周围无人且状态稳定。
+
+### App 操作
+
+1. 查看顶部状态为“已连接”，并确认机器人状态为 `IDLE · 未解锁`。
+2. 点击“进入 TELEOP”，状态变为 `TELEOP · 已解锁` 后才会接受摇杆。
+3. 左摇杆控制前后和横移，右摇杆控制旋转；松开摇杆会持续发送零速度帧。
+4. 运动模式按钮发送 `PASSIVE_DEFAULT`、`DAMPING_DEFAULT`、`JOINT_DEFAULT`、
+   `STAND_DEFAULT` 或 `LOCOMOTION_DEFAULT`。
+5. 手部预设动作会先停止底盘，动作完成后回到 `IDLE`，必须重新进入 TELEOP。
+6. 发现异常时点击“急停”；急停锁存，确认安全后才允许清除并重新解锁。
+
+### 连接和并发规则
+
+- 桥接服务只授予一个控制租约。另一台手机连接时会收到 `busy`。
+- 同一手机重新建立连接时，新连接会替换旧连接；旧连接收到的延迟帧不会再进入机器人。
+- 每个控制消息带递增 `sequence`，重复或乱序消息会被拒绝。
+- App 每 50 ms 发送速度帧；服务端超过 0.4 秒未收到速度/心跳会发零速度并进入 `TIMEOUT`。
+- App 切后台、锁屏、关闭连接或网络断开都会停止控制；服务端断开处理也会停车。
+
+### 常见问题
+
+| 现象 | 检查项 |
+|---|---|
+| App 一直连接失败 | 手机与 PC2 是否同一 Wi-Fi；AP 是否启用了 client isolation；服务是否监听 `0.0.0.0:8765`；防火墙是否允许 8765 |
+| 收到 `busy` | 另一台手机仍占用控制，或旧连接尚未释放；关闭旧 App 后重新连接 |
+| 已连接但不能移动 | 必须先点击“进入 TELEOP”；确认服务状态不是 `ESTOP`、`TIMEOUT`，且物理急停已释放 |
+| 一拖摇杆就回到 TIMEOUT | 检查手机是否切后台、网络是否抖动，PC2 时间/负载是否异常；速度帧必须持续到达 |
+| 真机服务启动失败 | 确认使用 `run` 用户、已 source `cobridge/setup.bash`，并检查 AimDK 服务是否可用 |
+| iPhone 无法访问 | 使用 Development Build/EAS Build，确认本地网络权限；在同一 Wi-Fi 下重试，不要使用公网地址 |
+

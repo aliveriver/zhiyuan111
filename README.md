@@ -57,6 +57,52 @@ uv run x2-ps5-input-test
 
 ## X2 ROS 2 模式
 
+## 手机 Expo App
+
+手机端代码位于 [mobile](mobile)，PC2 桥接服务位于 `src/x2_ps5_teleop/bridge`。
+完整流程见 [手机 App 使用说明](docs/MOBILE_APP_PLAN.md#手机-app-使用流程)。
+
+### 本地 Mock 联调
+
+```powershell
+uv sync
+uv run pytest
+uv run x2-teleop-bridge --robot mock --host 0.0.0.0 --port 8765
+cd mobile
+npm install
+npm start
+```
+
+手机和运行桥接服务的电脑连接同一个局域网，在 App 地址栏填写
+`ws://电脑局域网IP:8765`，点击“连接”。Mock 模式只打印命令，不会连接机器人，适合
+先验证连接、解锁、摇杆、急停和断连停车。
+
+### 真机使用前提
+
+真机模式只能在 PC2（通常为 `10.0.1.41`）运行，不能在 PC1（`10.0.1.40`）运行。必须
+以官方 `run` 用户加载 AimDK 环境后启动：
+
+```bash
+cd /agibot/data/home/agi/x2_ps5_teleop
+source /agibot/software/cobridge/setup.bash
+export PYTHONPATH=$PWD/src:/agibot/software/common/local/lib/python3.10/dist-packages:/agibot/software/ec/local/lib/python3.10/dist-packages:$PYTHONPATH
+export AMENT_PREFIX_PATH=/agibot/software/common:/agibot/software/ec:$AMENT_PREFIX_PATH
+export LD_LIBRARY_PATH=/agibot/software/common/lib:/agibot/software/ec/lib:$LD_LIBRARY_PATH
+x2-teleop-bridge --robot x2 --host 0.0.0.0 --port 8765 --source mobile_app
+```
+
+启动后 App 初始为 `IDLE`。确认物理急停已释放、周围无人且机器人状态稳定，再点击
+“进入 TELEOP”。松开摇杆、退出 App、切后台、断开网络或超过 0.4 秒未收到控制帧时，
+桥接服务都会发送零速度。物理急停始终必须有人值守。
+
+### 手机控制规则
+
+- 同一时间只允许一个手机控制；另一台手机会收到 `busy`。
+- 同一手机重新连接时，新连接会接管旧连接，旧连接的延迟消息不会继续控制机器人。
+- 速度帧由服务端再次限幅，服务端拒绝乱序或重复序列号。
+- 手部预设动作会先停车，执行后回到 `IDLE`，需要再次点击“进入 TELEOP”。
+- “急停”是锁存状态，必须在确认安全后发送清除急停，再重新进入 TELEOP。
+
 ### 关于官方蓝牙遥控器连接
 
 如果按 X2 官方设置将 DualSense 直接与机器人配对，手柄会出现在运控计算机
