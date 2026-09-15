@@ -20,10 +20,12 @@ PRESET_ACTIONS = {
 # slots are thumb motors; left-thumb positions are mirrored by the firmware.
 HAND_SLOT_COUNT = 10
 HAND_PRESETS = {
-    HandAction.RT: ("right", 0.0),
-    HandAction.LT: ("left", 0.0),
-    HandAction.R1: ("right", 0.8),
-    HandAction.L1: ("left", 0.8),
+    # The four mobile presets are intentionally explicit so they remain easy
+    # to calibrate when the installed hand firmware exposes different limits.
+    HandAction.R1: ("both", (0.8,) * HAND_SLOT_COUNT),       # 握紧
+    HandAction.RT: ("both", (0.0,) * HAND_SLOT_COUNT),       # 张开
+    HandAction.L1: ("both", (0.0, 0.0, 0.0, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8)),  # 比个耶
+    HandAction.LT: ("both", (0.0, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8)),  # 点个赞
 }
 
 
@@ -32,6 +34,7 @@ class RobotInterface:
     def stop(self) -> None: ...
     def set_mode(self, mode: Mode) -> None: ...
     def hand_action(self, action: HandAction) -> None: ...
+    def hand_target(self, side: str, joints: list[tuple[int, float, float, float, float, float]]) -> None: ...
     def close(self) -> None: ...
 
 
@@ -50,6 +53,9 @@ class MockRobot(RobotInterface):
 
     def hand_action(self, action: HandAction) -> None:
         print(f"HAND ACTION={action.value}", file=self.stream, flush=True)
+
+    def hand_target(self, side: str, joints: list[tuple[int, float, float, float, float, float]]) -> None:
+        print(f"HAND TARGET side={side} joints={len(joints)}", file=self.stream, flush=True)
 
     def close(self) -> None:
         self.stop()
@@ -193,20 +199,35 @@ class X2RosRobot(RobotInterface):
         self._wait_for_result(future, "切换运动模式", timeout=1.0)
 
     def hand_action(self, action: HandAction) -> None:
-        side, position = HAND_PRESETS[action]
+        side, positions = HAND_PRESETS[action]
         msg = self._msg[6]()
         msg.header = self._msg[4]()
         msg.header.stamp = self._now().to_msg()
         msg.header.frame_id = "hand_command"
         msg.left_hand_type.value = 1
         msg.right_hand_type.value = 1
-        msg.left_hands = [self._hand_command("left", i, position if side == "left" else 0.0)
-                          for i in range(HAND_SLOT_COUNT)]
-        msg.right_hands = [self._hand_command("right", i, position if side == "right" else 0.0)
-                           for i in range(HAND_SLOT_COUNT)]
+        msg.left_hands = [self._hand_command("left", i, positions[i]) for i in range(HAND_SLOT_COUNT)]
+        msg.right_hands = [self._hand_command("right", i, positions[i]) for i in range(HAND_SLOT_COUNT)]
         self.hand_pub.publish(msg)
 
-    def _hand_command(self, side: str, index: int, position: float):
+    def hand_target(self, side: str, joints: list[tuple[int, float, float, float, float, float]]) -> None:
+        if side not in ("left", "right"):
+            raise ValueError("side 必须是 left 或 right")
+        msg = self._msg[6]()
+        msg.header = self._msg[4]()
+        msg.header.stamp = self._now().to_msg()
+        msg.header.frame_id = "hand_command"
+        msg.left_hand_type.value = 1
+        msg.right_hand_type.value = 1
+        values = {index: (position, velocity, acceleration, deceleration, effort) for index, position, velocity, acceleration, deceleration, effort in joints}
+        hands = [self._hand_command(side, index, *values[index]) for index in range(HAND_SLOT_COUNT)]
+        if side == "left":
+            msg.left_hands, msg.right_hands = hands, [self._hand_command("right", i, 0.0, 0.1, 0.0, 0.0, 0.0) for i in range(HAND_SLOT_COUNT)]
+        else:
+            msg.right_hands, msg.left_hands = hands, [self._hand_command("left", i, 0.0, 0.1, 0.0, 0.0, 0.0) for i in range(HAND_SLOT_COUNT)]
+        self.hand_pub.publish(msg)
+
+    def _hand_command(self, side: str, index: int, position: float, velocity: float = 0.1, acceleration: float = 0.0, deceleration: float = 0.0, effort: float = 0.0):
         cmd = self._msg[7]()
         if index == 0:
             cmd.name = f"{side}_thumb"
@@ -215,10 +236,10 @@ class X2RosRobot(RobotInterface):
         else:
             cmd.name = "right_pinky"
         cmd.position = float(-position if side == "left" and index < 3 else position)
-        cmd.velocity = 0.1
-        cmd.acceleration = 0.0
-        cmd.deceleration = 0.0
-        cmd.effort = 0.0
+        cmd.velocity = float(velocity)
+        cmd.acceleration = float(acceleration)
+        cmd.deceleration = float(deceleration)
+        cmd.effort = float(effort)
         return cmd
 
     def _now(self):

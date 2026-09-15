@@ -33,10 +33,10 @@ const MODES = [
   ['LOCOMOTION_DEFAULT', '行走'],
 ] as const;
 const PRESETS = [
-  ['right_wave', '右手挥手'],
-  ['left_wave', '左手挥手'],
-  ['right_raise', '右手举手'],
-  ['left_raise', '左手举手'],
+  ['grip', '握紧'],
+  ['open', '张开'],
+  ['victory', '比个耶'],
+  ['thumbs_up', '点个赞'],
 ] as const;
 
 function clamp(value: number, min: number, max: number) {
@@ -66,10 +66,12 @@ function Joystick({
   const responder = useMemo(
     () =>
       PanResponder.create({
+        onStartShouldSetPanResponderCapture: () => true,
+        onMoveShouldSetPanResponderCapture: () => true,
         onStartShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponder: () => true,
-        onPanResponderGrant: (event) => updateFromTouch(event.nativeEvent.locationX - size / 2, event.nativeEvent.locationY - size / 2),
-        onPanResponderMove: (event) => updateFromTouch(event.nativeEvent.locationX - size / 2, event.nativeEvent.locationY - size / 2),
+        onPanResponderGrant: () => onChange({ x: 0, y: 0 }),
+        onPanResponderMove: (_event, gestureState) => updateFromTouch(gestureState.dx, gestureState.dy),
         onPanResponderRelease: () => onChange({ x: 0, y: 0 }),
         onPanResponderTerminate: () => onChange({ x: 0, y: 0 }),
       }),
@@ -109,6 +111,14 @@ export default function App() {
   });
   const [leftStick, setLeftStick] = useState<JoystickValue>({ x: 0, y: 0 });
   const [rightStick, setRightStick] = useState<JoystickValue>({ x: 0, y: 0 });
+  const leftStickRef = useRef<JoystickValue>({ x: 0, y: 0 });
+  const rightStickRef = useRef<JoystickValue>({ x: 0, y: 0 });
+  const [page, setPage] = useState<'move' | 'hand'>('move');
+  const [handSide, setHandSide] = useState<'left' | 'right'>('left');
+  const [handTargets, setHandTargets] = useState<Record<'left' | 'right', Array<{ position: string; velocity: string; acceleration: string; deceleration: string; effort: string }>>>({
+    left: Array.from({ length: 10 }, () => ({ position: '0', velocity: '0.1', acceleration: '0', deceleration: '0', effort: '0' })),
+    right: Array.from({ length: 10 }, () => ({ position: '0', velocity: '0.1', acceleration: '0', deceleration: '0', effort: '0' })),
+  });
   const socketRef = useRef<WebSocket | null>(null);
   const socketTokenRef = useRef(0);
   const sequenceRef = useRef(0);
@@ -136,6 +146,11 @@ export default function App() {
     socketRef.current = null;
     connectedRef.current = false;
     armedRef.current = false;
+    leftStickRef.current = { x: 0, y: 0 };
+    rightStickRef.current = { x: 0, y: 0 };
+    motionRef.current = { forward: 0, lateral: 0, angular: 0 };
+    setLeftStick({ x: 0, y: 0 });
+    setRightStick({ x: 0, y: 0 });
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'arm', enabled: false, sequence: ++sequenceRef.current }));
       socket.close();
@@ -236,13 +251,15 @@ export default function App() {
   useEffect(() => () => closeConnection(false), [closeConnection]);
 
   const setLeft = useCallback((value: JoystickValue) => {
+    leftStickRef.current = value;
     setLeftStick(value);
-    updateMotion(value, rightStick);
-  }, [rightStick, updateMotion]);
+    updateMotion(value, rightStickRef.current);
+  }, [updateMotion]);
   const setRight = useCallback((value: JoystickValue) => {
+    rightStickRef.current = value;
     setRightStick(value);
-    updateMotion(leftStick, value);
-  }, [leftStick, updateMotion]);
+    updateMotion(leftStickRef.current, value);
+  }, [updateMotion]);
 
   const arm = () => {
     const enabled = !bridgeState.armed;
@@ -251,10 +268,31 @@ export default function App() {
   const emergencyStop = () => {
     if (send({ type: 'estop' })) {
       armedRef.current = false;
+      leftStickRef.current = { x: 0, y: 0 };
+      rightStickRef.current = { x: 0, y: 0 };
       setLeftStick({ x: 0, y: 0 });
       setRightStick({ x: 0, y: 0 });
       motionRef.current = { forward: 0, lateral: 0, angular: 0 };
     }
+  };
+
+  const updateHandTarget = (index: number, key: 'position' | 'velocity' | 'acceleration' | 'deceleration' | 'effort', value: string) => {
+    setHandTargets((current) => ({
+      ...current,
+      [handSide]: current[handSide].map((joint, jointIndex) => jointIndex === index ? { ...joint, [key]: value } : joint),
+    }));
+  };
+
+  const sendHandTarget = () => {
+    const joints = handTargets[handSide].map((joint, index) => ({
+      index,
+      position: Number(joint.position) || 0,
+      velocity: Number(joint.velocity) || 0,
+      acceleration: Number(joint.acceleration) || 0,
+      deceleration: Number(joint.deceleration) || 0,
+      effort: Number(joint.effort) || 0,
+    }));
+    send({ type: 'hand_target', side: handSide, joints });
   };
 
   return (
@@ -278,10 +316,15 @@ export default function App() {
           <Text style={styles.stateText}>{bridgeState.state}{bridgeState.armed ? ' · 已解锁' : ' · 未解锁'}</Text>
         </View>
 
-        <View style={[styles.mainRow, compactLayout && styles.mainRowCompact]}>
+        <View style={styles.tabs}>
+          <Pressable style={[styles.tab, page === 'move' && styles.tabActive]} onPress={() => setPage('move')}><Text style={styles.tabText}>移动控制</Text></Pressable>
+          <Pressable style={[styles.tab, page === 'hand' && styles.tabActive]} onPress={() => setPage('hand')}><Text style={styles.tabText}>灵巧手参数</Text></Pressable>
+        </View>
+
+        {page === 'move' ? <View style={[styles.mainRow, compactLayout && styles.mainRowCompact]}>
           <View style={styles.controlPanel}>
-            <Joystick label="前进 / 横移" value={leftStick} onChange={setLeft} />
-            <Joystick label="旋转" value={rightStick} onChange={setRight} />
+            <Joystick label="前进 / 后退 / 横移" value={leftStick} onChange={setLeft} />
+            <Joystick label="旋转（左 / 右）" value={rightStick} onChange={setRight} />
           </View>
           <View style={[styles.actionPanel, compactLayout && styles.actionPanelCompact]}>
             <View style={styles.armRow}>
@@ -294,13 +337,29 @@ export default function App() {
             <View style={styles.buttonGrid}>
               {MODES.map(([mode, label]) => <Pressable key={mode} style={styles.modeButton} onPress={() => send({ type: 'mode', mode })}><Text style={styles.modeText}>{label}</Text></Pressable>)}
             </View>
-            <Text style={styles.sectionLabel}>手部预设（执行后自动回到 IDLE）</Text>
+            <Text style={styles.sectionLabel}>手部预设</Text>
             <View style={styles.buttonGrid}>
               {PRESETS.map(([action, label]) => <Pressable key={action} style={styles.presetButton} onPress={() => send({ type: 'preset', action })}><Text style={styles.modeText}>{label}</Text></Pressable>)}
             </View>
             <Text style={styles.hint}>松开摇杆立即发零速度；切后台或断网会自动停车。</Text>
           </View>
-        </View>
+        </View> : <View style={styles.handPanel}>
+          <View style={styles.armRow}>
+            <Pressable style={[styles.armButton, bridgeState.armed && styles.disarmButton]} onPress={arm}>
+              <Text style={styles.armText}>{bridgeState.armed ? '退出 TELEOP' : '进入 TELEOP'}</Text>
+            </Pressable>
+            <Pressable style={styles.estopButton} onPress={emergencyStop}><Text style={styles.estopText}>急停</Text></Pressable>
+          </View>
+          <View style={styles.sideSwitch}>
+            {(['left', 'right'] as const).map((side) => <Pressable key={side} style={[styles.sideButton, handSide === side && styles.sideButtonActive]} onPress={() => setHandSide(side)}><Text style={styles.sideText}>{side === 'left' ? '左手' : '右手'}</Text></Pressable>)}
+          </View>
+          <Text style={styles.handHint}>每只手 10 个命令槽。填写位置、速度和力度后发送单帧。</Text>
+          {handTargets[handSide].map((joint, index) => <View key={index} style={styles.jointRow}>
+            <Text style={styles.jointName}>关节 {index + 1}</Text>
+            {(['position', 'velocity', 'acceleration', 'deceleration', 'effort'] as const).map((key) => <TextInput key={key} value={joint[key]} onChangeText={(value) => updateHandTarget(index, key, value)} keyboardType="numeric" style={styles.jointInput} placeholder={key === 'position' ? '位置' : key === 'velocity' ? '速度' : key === 'acceleration' ? '加速度' : key === 'deceleration' ? '减速度' : '力度'} placeholderTextColor="#6d7885" />)}
+          </View>)}
+          <Pressable style={styles.sendHandButton} onPress={sendHandTarget}><Text style={styles.armText}>发送单帧</Text></Pressable>
+        </View>}
       </ScrollView>
     </SafeAreaView>
   );
@@ -320,7 +379,11 @@ const styles = StyleSheet.create({
   connectButton: { backgroundColor: '#295d8a', paddingHorizontal: 18, paddingVertical: 10, borderRadius: 8 },
   connectText: { color: '#fff', fontWeight: '700' },
   stateText: { color: '#9fabb8', minWidth: 128, textAlign: 'right', fontSize: 13 },
-  mainRow: { flex: 1, flexDirection: 'row', marginTop: 16, gap: 16, minHeight: 390 },
+  tabs: { flexDirection: 'row', marginTop: 16, borderBottomWidth: 1, borderBottomColor: '#243341' },
+  tab: { paddingHorizontal: 18, paddingVertical: 11 },
+  tabActive: { borderBottomWidth: 2, borderBottomColor: '#62b4e6' },
+  tabText: { color: '#dce7ef', fontWeight: '700', fontSize: 14 },
+  mainRow: { flexDirection: 'row', marginTop: 16, gap: 16, minHeight: 390 },
   mainRowCompact: { flexDirection: 'column', minHeight: 0 },
   controlPanel: { flex: 0.95, backgroundColor: '#101923', borderColor: '#1d2a37', borderWidth: 1, borderRadius: 12, flexDirection: 'row', justifyContent: 'space-evenly', alignItems: 'center', minHeight: 236, paddingVertical: 18 },
   joystickColumn: { alignItems: 'center' },
@@ -341,4 +404,14 @@ const styles = StyleSheet.create({
   presetButton: { backgroundColor: '#332b48', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 11, minWidth: 118, alignItems: 'center', flexGrow: 1 },
   modeText: { color: '#dce7ef', fontSize: 13, fontWeight: '600' },
   hint: { color: '#667684', fontSize: 11, marginTop: 'auto', paddingTop: 12 },
+  handPanel: { marginTop: 16, backgroundColor: '#101923', borderColor: '#1d2a37', borderWidth: 1, borderRadius: 12, padding: 16 },
+  sideSwitch: { flexDirection: 'row', gap: 8 },
+  sideButton: { flex: 1, backgroundColor: '#1a2e3f', paddingVertical: 11, alignItems: 'center', borderRadius: 8 },
+  sideButtonActive: { backgroundColor: '#295d8a' },
+  sideText: { color: '#fff', fontWeight: '700' },
+  handHint: { color: '#8796a3', fontSize: 12, marginVertical: 12 },
+  jointRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
+  jointName: { color: '#c9d5df', width: 58, fontSize: 12 },
+  jointInput: { flex: 1, minWidth: 0, color: '#e7edf3', backgroundColor: '#111a23', borderColor: '#273644', borderWidth: 1, borderRadius: 7, paddingHorizontal: 8, paddingVertical: 8, fontSize: 12 },
+  sendHandButton: { backgroundColor: '#267558', borderRadius: 8, alignItems: 'center', justifyContent: 'center', minHeight: 44, marginTop: 8 },
 });

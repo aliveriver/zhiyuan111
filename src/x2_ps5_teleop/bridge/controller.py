@@ -137,6 +137,8 @@ class BridgeController:
                 self._mode_locked(message.get("mode"), now)
             elif message_type == "preset":
                 self._preset_locked(message.get("action"), now)
+            elif message_type == "hand_target":
+                self._hand_target_locked(message, now)
             elif message_type == "estop":
                 self._estop_locked()
             elif message_type == "clear_estop":
@@ -226,6 +228,10 @@ class BridgeController:
             "left_wave": HandAction.LT,
             "right_raise": HandAction.R1,
             "left_raise": HandAction.L1,
+            "grip": HandAction.R1,
+            "open": HandAction.RT,
+            "victory": HandAction.L1,
+            "thumbs_up": HandAction.LT,
         }
         try:
             action = action_by_name[str(action_value)]
@@ -233,6 +239,32 @@ class BridgeController:
             raise BridgeError("invalid_preset", "不支持的预设动作") from exc
         self._stop_locked()
         self.robot.hand_action(action)
+        self.state = TeleopState.IDLE
+        self.armed = False
+        self.last_command_at = None
+
+    def _hand_target_locked(self, message: dict[str, Any], now: float) -> None:
+        if not self.armed or self.state != TeleopState.TELEOP:
+            raise BridgeError("not_armed", "请先进入 TELEOP")
+        side = message.get("side")
+        joints = message.get("joints")
+        if side not in ("left", "right") or not isinstance(joints, list) or len(joints) != 10:
+            raise BridgeError("invalid_hand_target", "hand_target 需要 side 和 10 个关节")
+        clean = []
+        for index, joint in enumerate(joints):
+            if not isinstance(joint, dict):
+                raise BridgeError("invalid_hand_target", "关节参数格式无效")
+            values = []
+            for key in ("position", "velocity", "acceleration", "deceleration", "effort"):
+                value = self._finite_number(joint.get(key), key)
+                if abs(value) > 10:
+                    raise BridgeError("invalid_hand_target", f"{key} 超出安全范围")
+                values.append(value)
+            if joint.get("index", index) != index:
+                raise BridgeError("invalid_hand_target", "关节序号必须连续")
+            clean.append((index, *values))
+        self._stop_locked()
+        self.robot.hand_target(str(side), clean)
         self.state = TeleopState.IDLE
         self.armed = False
         self.last_command_at = None

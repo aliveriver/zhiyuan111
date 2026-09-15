@@ -23,6 +23,9 @@ class RecordingRobot:
     def hand_action(self, action):
         self.calls.append(("hand", action))
 
+    def hand_target(self, side, joints):
+        self.calls.append(("hand_target", side, joints))
+
     def close(self):
         self.calls.append(("close",))
 
@@ -96,5 +99,22 @@ def test_preset_stops_and_returns_to_idle():
         assert state["state"] == "IDLE"
         assert not state["armed"]
         assert robot.calls[-2:] == [("stop",), ("hand", HandAction.RT)]
+
+    run(scenario())
+
+
+def test_hand_target_is_validated_and_returns_to_idle():
+    robot = RecordingRobot()
+    controller = BridgeController(robot)
+
+    async def scenario():
+        await controller.register("s1", "phone")
+        await controller.handle("s1", {"type": "arm", "enabled": True, "sequence": 1}, now=1)
+        joints = [{"index": index, "position": 0.1, "velocity": 0.2, "acceleration": 0.3, "deceleration": 0.4, "effort": 0.0} for index in range(10)]
+        state = await controller.handle("s1", {"type": "hand_target", "side": "left", "joints": joints, "sequence": 2}, now=1.1)
+        assert state["state"] == "IDLE"
+        assert not state["armed"]
+        assert robot.calls[-2][0] == "stop"
+        assert robot.calls[-1][0:2] == ("hand_target", "left")
 
     run(scenario())
