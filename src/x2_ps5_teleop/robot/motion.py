@@ -20,6 +20,9 @@ PRESET_ACTIONS = {
 # Official OmniHand examples use ten command slots per hand.  The first three
 # slots are thumb motors; left-thumb positions are mirrored by the firmware.
 HAND_SLOT_COUNT = 10
+ARM_POSITION_STIFFNESS = 20.0
+ARM_POSITION_DAMPING = 2.0
+ARM_TEACH_DAMPING = 5.0
 HAND_PRESETS = {
     # The four mobile presets are intentionally explicit so they remain easy
     # to calibrate when the installed hand firmware exposes different limits.
@@ -39,6 +42,10 @@ class RobotInterface:
     def arm_target(self, joints: list[dict[str, Any]]) -> None: ...
     def upper_body_target(self, frame: dict[str, Any]) -> None: ...
     def upper_body_state(self) -> dict[str, Any] | None: ...
+    def prepare_upper_body_teaching(self) -> None: ...
+    def upper_body_teaching_step(self) -> None: ...
+    def end_upper_body_teaching(self) -> None: ...
+    def prepare_upper_body_playback(self, frame: dict[str, Any]) -> None: ...
     def close(self) -> None: ...
 
 
@@ -69,6 +76,18 @@ class MockRobot(RobotInterface):
 
     def upper_body_state(self) -> dict[str, Any] | None:
         return None
+
+    def prepare_upper_body_teaching(self) -> None:
+        print("ARM TEACHING prepare", file=self.stream, flush=True)
+
+    def upper_body_teaching_step(self) -> None:
+        print("ARM TEACHING damping", file=self.stream, flush=True)
+
+    def end_upper_body_teaching(self) -> None:
+        print("ARM TEACHING end", file=self.stream, flush=True)
+
+    def prepare_upper_body_playback(self, frame: dict[str, Any]) -> None:
+        print(f"ARM PLAYBACK prepare joints={len(frame.get('arm', []))}", file=self.stream, flush=True)
 
     def close(self) -> None:
         self.stop()
@@ -105,7 +124,7 @@ class X2RosRobot(RobotInterface):
                 JointStateArray,
                 HandStateArray,
             )
-            from aimdk_msgs.srv import SetMcAction, SetMcInputSource, GetHandType
+            from aimdk_msgs.srv import SetMcAction, SetMcInputSource, GetHandType, GetSystemState
             from aimdk_msgs.msg import McInputAction, McInputSource
         except ImportError as exc:  # pragma: no cover - 仅在 ROS 主机上执行
             raise RuntimeError("X2 模式需要开发计算机上的 ROS 2 Humble 和 aimdk_msgs") from exc
@@ -114,7 +133,7 @@ class X2RosRobot(RobotInterface):
         self._msg = (McLocomotionVelocity, McActionCommand, McControlArea, McPresetMotion,
                      MessageHeader, RequestHeader, HandCommandArray, HandCommand,
                      JointCommandArray, JointCommand, JointStateArray, HandStateArray)
-        self._srv = (SetMcAction, SetMcInputSource, GetHandType)
+        self._srv = (SetMcAction, SetMcInputSource, GetHandType, GetSystemState)
         self._input_types = (McInputAction, McInputSource)
         if not rclpy.ok():
             rclpy.init()
@@ -132,6 +151,7 @@ class X2RosRobot(RobotInterface):
         self.mode_client = self.node.create_client(SetMcAction, "/aimdk_5Fmsgs/srv/SetMcAction")
         self.source_client = self.node.create_client(SetMcInputSource, "/aimdk_5Fmsgs/srv/SetMcInputSource")
         self.hand_type_client = self.node.create_client(GetHandType, "/aimdk_5Fmsgs/srv/GetHandType")
+        self.system_state_client = self.node.create_client(GetSystemState, "/aimdk_5Fmsgs/srv/GetSystemState")
         try:
             self._require_services()
             self._register_source()
@@ -147,6 +167,7 @@ class X2RosRobot(RobotInterface):
             (self.source_client, "/aimdk_5Fmsgs/srv/SetMcInputSource"),
             (self.mode_client, "/aimdk_5Fmsgs/srv/SetMcAction"),
             (self.hand_type_client, "/aimdk_5Fmsgs/srv/GetHandType"),
+            (self.system_state_client, "/aimdk_5Fmsgs/srv/GetSystemState"),
         )
         unavailable = [name for client, name in required if not client.wait_for_service(timeout_sec=2.0)]
         if unavailable:
@@ -247,9 +268,9 @@ class X2RosRobot(RobotInterface):
         values = {index: (position, velocity, acceleration, deceleration, effort) for index, position, velocity, acceleration, deceleration, effort in joints}
         hands = [self._hand_command(side, index, *values[index]) for index in range(HAND_SLOT_COUNT)]
         if side == "left":
-            msg.left_hands, msg.right_hands = hands, [self._hand_command("right", i, 0.0, 0.1, 0.0, 0.0, 0.0) for i in range(HAND_SLOT_COUNT)]
+            msg.left_hands, msg.right_hands = hands, []
         else:
-            msg.right_hands, msg.left_hands = hands, [self._hand_command("left", i, 0.0, 0.1, 0.0, 0.0, 0.0) for i in range(HAND_SLOT_COUNT)]
+            msg.right_hands, msg.left_hands = hands, []
         self.hand_pub.publish(msg)
 
     def _on_arm_state(self, msg) -> None:
@@ -285,8 +306,8 @@ class X2RosRobot(RobotInterface):
             cmd.position = float(item.get("position", 0.0))
             cmd.velocity = float(item.get("velocity", 0.0))
             cmd.effort = float(item.get("effort", 0.0))
-            cmd.stiffness = float(item.get("stiffness", 0.0))
-            cmd.damping = float(item.get("damping", 0.0))
+            cmd.stiffness = float(item.get("stiffness", ARM_POSITION_STIFFNESS))
+            cmd.damping = float(item.get("damping", ARM_POSITION_DAMPING))
             msg.joints.append(cmd)
         self.arm_pub.publish(msg)
 
@@ -307,6 +328,55 @@ class X2RosRobot(RobotInterface):
             msg.left_hands = [self._hand_command("left", i, float(item.get("position", 0.0)), float(item.get("velocity", 0.1)), 0.0, 0.0, float(item.get("effort", 0.0))) for i, item in enumerate(left)]
             msg.right_hands = [self._hand_command("right", i, float(item.get("position", 0.0)), float(item.get("velocity", 0.1)), 0.0, 0.0, float(item.get("effort", 0.0))) for i, item in enumerate(right)]
             self.hand_pub.publish(msg)
+
+    def upper_body_teaching_step(self) -> None:
+        """Apply damping to the 14 arm joints only; leg/waist topics are untouched."""
+        state = self.upper_body_state()
+        if not state or not state.get("arm"):
+            return
+        joints = [{
+            "name": item["name"],
+            "position": 0.0,
+            "velocity": 0.0,
+            "effort": 0.0,
+            "stiffness": 0.0,
+            "damping": ARM_TEACH_DAMPING,
+        } for item in state["arm"]]
+        self.arm_target(joints)
+
+    def prepare_upper_body_teaching(self) -> None:
+        self._require_develop_mc("上肢示教录制")
+        state = self.upper_body_state()
+        arm_count = len(state.get("arm", [])) if state else 0
+        if arm_count != 14:
+            raise RuntimeError(f"机械臂状态应包含 14 个关节，实际为 {arm_count}")
+        self.upper_body_teaching_step()
+
+    def end_upper_body_teaching(self) -> None:
+        # Hold the measured pose when leaving teaching mode, avoiding a jump to
+        # a stale target. Hands aren't changed because OmniHand exposes no
+        # documented torque-disable field on this firmware.
+        state = self.upper_body_state()
+        if state and state.get("arm"):
+            self.arm_target(state["arm"])
+
+    def prepare_upper_body_playback(self, frame: dict[str, Any]) -> None:
+        self._require_develop_mc("上肢轨迹播放")
+        arm = frame.get("arm", [])
+        if len(arm) != 14:
+            raise RuntimeError(f"轨迹机械臂关节数应为 14，实际为 {len(arm)}")
+
+    def _require_develop_mc(self, operation: str) -> None:
+        if not self.system_state_client.wait_for_service(timeout_sec=1.0):
+            raise RuntimeError("GetSystemState 服务不可用，无法安全确认系统状态")
+        future = self.system_state_client.call_async(self._srv[3].Request())
+        response = self._wait_for_result(future, "查询系统状态", timeout=2.0)
+        current = str(response.cur_state)
+        if current != "Develop_MC":
+            raise RuntimeError(
+                f"当前系统状态为 {current}；{operation}需要 Develop_MC。"
+                "请由现场人员确认物理急停后切换系统状态"
+            )
 
     def _hand_command(self, side: str, index: int, position: float, velocity: float = 0.1, acceleration: float = 0.0, deceleration: float = 0.0, effort: float = 0.0):
         cmd = self._msg[7]()

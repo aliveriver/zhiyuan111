@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   AppState,
   AppStateStatus,
   PanResponder,
@@ -21,9 +22,17 @@ type BridgeState = {
   source: string;
   last_command_age_ms: number | null;
   robot_connected: boolean;
+  recording_name: string | null;
+  recording_frames: number;
+  recording_sample_rate_hz: number | null;
+  playback_state: 'idle' | 'playing' | 'paused' | 'completed' | 'error';
+  playback_name: string | null;
+  playback_progress_ms: number;
+  playback_duration_ms: number;
+  playback_error: string | null;
 };
 type JoystickValue = { x: number; y: number };
-type TrajectoryInfo = { name: string; frames: number };
+type TrajectoryInfo = { name: string; frames: number; duration_ms: number; arm_joints: number; left_hand_joints: number; right_hand_joints: number };
 type HandField = 'position' | 'velocity' | 'acceleration' | 'deceleration' | 'effort';
 const HAND_FIELDS: Array<{ key: HandField; label: string; range: string; hint: string }> = [
   { key: 'position', label: '位置', range: '−1～1', hint: '关节目标位置' },
@@ -57,6 +66,18 @@ const AWARD_PRESETS = [
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function bridgeStateFrom(payload: Partial<BridgeState>, fallback: BridgeState): BridgeState {
+  return {
+    ...fallback,
+    ...payload,
+    state: typeof payload.state === 'string' ? payload.state : fallback.state,
+    armed: payload.armed ?? fallback.armed,
+    robot_connected: payload.robot_connected ?? fallback.robot_connected,
+    recording_name: payload.recording_name === undefined ? fallback.recording_name : payload.recording_name,
+    playback_state: payload.playback_state ?? fallback.playback_state,
+  };
 }
 
 function Joystick({
@@ -124,6 +145,14 @@ export default function App() {
     source: 'mobile_app',
     last_command_age_ms: null,
     robot_connected: false,
+    recording_name: null,
+    recording_frames: 0,
+    recording_sample_rate_hz: null,
+    playback_state: 'idle',
+    playback_name: null,
+    playback_progress_ms: 0,
+    playback_duration_ms: 0,
+    playback_error: null,
   });
   const [leftStick, setLeftStick] = useState<JoystickValue>({ x: 0, y: 0 });
   const [rightStick, setRightStick] = useState<JoystickValue>({ x: 0, y: 0 });
@@ -136,11 +165,12 @@ export default function App() {
     right: Array.from({ length: 10 }, () => ({ position: '0', velocity: '0.1', acceleration: '0', deceleration: '0', effort: '0' })),
   });
   const [trajectories, setTrajectories] = useState<TrajectoryInfo[]>([]);
-  const [trajectoryName, setTrajectoryName] = useState('我的轨迹');
+  const [trajectoryName, setTrajectoryName] = useState('');
   const [sampleRate, setSampleRate] = useState('20');
   const [playbackSpeed, setPlaybackSpeed] = useState('1');
   const [selectedTrajectory, setSelectedTrajectory] = useState('');
-  const [recording, setRecording] = useState(false);
+  const [renameDraft, setRenameDraft] = useState('');
+  const recording = bridgeState.recording_name !== null;
   const socketRef = useRef<WebSocket | null>(null);
   const socketTokenRef = useRef(0);
   const sequenceRef = useRef(0);
@@ -217,26 +247,36 @@ export default function App() {
             last_command_age_ms?: number | null;
             robot_connected?: boolean;
             trajectories?: TrajectoryInfo[];
+            request_type?: string;
             code?: string;
             message?: string;
           };
           if (message.type === 'hello_ack') {
             console.info('[teleop] bridge hello_ack', message.protocol_version, message.capabilities || []);
           } else if (message.type === 'state') {
-            const next: BridgeState = {
-              state: typeof message.state === 'string' ? message.state : 'IDLE',
-              armed: Boolean(message.armed),
-              source: message.source || 'mobile_app',
-              last_command_age_ms: message.last_command_age_ms ?? null,
-              robot_connected: Boolean(message.robot_connected),
-            };
-            setBridgeState(next);
-            armedRef.current = next.armed;
+            setBridgeState((current) => {
+              const next = bridgeStateFrom(message as Partial<BridgeState>, current);
+              armedRef.current = next.armed;
+              return next;
+            });
           } else if (message.type === 'ack' && message.state && typeof message.state === 'object') {
-            setBridgeState(message.state);
-            armedRef.current = message.state.armed;
-            if (Array.isArray((message.state as unknown as { trajectories?: TrajectoryInfo[] }).trajectories)) {
-              setTrajectories((message.state as unknown as { trajectories: TrajectoryInfo[] }).trajectories);
+            const payload = message.state as unknown as Partial<BridgeState> & { trajectories?: TrajectoryInfo[] };
+            setBridgeState((current) => {
+              const next = bridgeStateFrom(payload, current);
+              armedRef.current = next.armed;
+              return next;
+            });
+            if (Array.isArray(payload.trajectories)) {
+              setTrajectories(payload.trajectories);
+            }
+            if (message.request_type === 'trajectory_record_start') setStatusText(`正在录制：${payload.recording_name || ''}`);
+            if (message.request_type === 'trajectory_record_stop') setStatusText('轨迹已保存');
+            if (message.request_type === 'trajectory_rename') setStatusText('轨迹名称已修改');
+            if (message.request_type === 'trajectory_delete') setStatusText('轨迹已删除');
+            if (message.request_type === 'trajectory_play') {
+              if (payload.playback_state === 'playing') setStatusText(`正在播放：${payload.playback_name || ''}`);
+              if (payload.playback_state === 'paused') setStatusText(`已暂停：${payload.playback_name || ''}`);
+              if (payload.playback_state === 'idle') setStatusText('播放已停止');
             }
           } else if (message.type === 'trajectory_list' && Array.isArray(message.trajectories)) {
             setTrajectories(message.trajectories);
@@ -287,6 +327,11 @@ export default function App() {
 
   useEffect(() => () => closeConnection(false), [closeConnection]);
 
+  useEffect(() => {
+    if (bridgeState.playback_state === 'completed') setStatusText(`播放完成：${bridgeState.playback_name || ''}`);
+    if (bridgeState.playback_state === 'error') setStatusText(bridgeState.playback_error || '轨迹播放失败');
+  }, [bridgeState.playback_error, bridgeState.playback_name, bridgeState.playback_state]);
+
   const setLeft = useCallback((value: JoystickValue) => {
     leftStickRef.current = value;
     setLeftStick(value);
@@ -334,30 +379,34 @@ export default function App() {
 
   const refreshTrajectories = useCallback(() => send({ type: 'trajectory_list' }), [send]);
   const startRecording = () => {
-    const name = trajectoryName.trim() || '未命名轨迹';
+    const name = trajectoryName.trim();
+    if (!name) {
+      setStatusText('请先填写一个不重复的轨迹名称');
+      return;
+    }
     const rate = Number(sampleRate);
     if (!Number.isFinite(rate) || rate < 1 || rate > 100) {
       setStatusText('采样频率需为 1～100 Hz');
       return;
     }
-    if (send({ type: 'trajectory_record_start', name, sample_rate_hz: rate })) setRecording(true);
+    send({ type: 'trajectory_record_start', name, sample_rate_hz: rate, teach_mode: true });
   };
   const stopRecording = () => {
-    if (send({ type: 'trajectory_record_stop' })) {
-      setRecording(false);
-      refreshTrajectories();
-    }
+    send({ type: 'trajectory_record_stop' });
   };
   const deleteTrajectory = (name: string) => {
-    if (send({ type: 'trajectory_delete', name })) {
-      if (selectedTrajectory === name) setSelectedTrajectory('');
-      refreshTrajectories();
-    }
+    Alert.alert('删除轨迹', `确定删除“${name}”吗？此操作无法撤销。`, [
+      { text: '取消', style: 'cancel' },
+      { text: '删除', style: 'destructive', onPress: () => {
+        if (send({ type: 'trajectory_delete', name }) && selectedTrajectory === name) setSelectedTrajectory('');
+      } },
+    ]);
   };
   const renameTrajectory = (name: string) => {
-    const next = trajectoryName.trim();
+    const next = renameDraft.trim();
     if (next && next !== name && send({ type: 'trajectory_rename', old_name: name, new_name: next })) {
       setSelectedTrajectory(next);
+      setRenameDraft('');
       refreshTrajectories();
     }
   };
@@ -370,6 +419,10 @@ export default function App() {
     send({ type: 'trajectory_play', name, speed });
   };
   const controlPlayback = (command: 'pause' | 'resume' | 'stop') => send({ type: 'trajectory_play', command });
+  const playbackPercent = bridgeState.playback_duration_ms > 0
+    ? Math.min(100, Math.round(bridgeState.playback_progress_ms * 100 / bridgeState.playback_duration_ms))
+    : 0;
+  const playbackActive = bridgeState.playback_state === 'playing' || bridgeState.playback_state === 'paused';
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -446,29 +499,34 @@ export default function App() {
             <Pressable style={styles.estopButton} onPress={emergencyStop}><Text style={styles.estopText}>急停</Text></Pressable>
           </View>
           <Text style={styles.sectionLabel}>轨迹名称</Text>
-          <TextInput value={trajectoryName} onChangeText={setTrajectoryName} style={styles.urlInput} placeholder="例如：抓取测试" placeholderTextColor="#6d7885" />
+          <TextInput value={trajectoryName} onChangeText={setTrajectoryName} editable={!recording} style={styles.urlInput} placeholder="必须填写，例如：单手抓取" placeholderTextColor="#6d7885" />
           <Text style={styles.sectionLabel}>上半身采样频率（Hz）</Text>
           <TextInput value={sampleRate} onChangeText={setSampleRate} style={styles.rateInput} keyboardType="numeric" placeholder="20" placeholderTextColor="#6d7885" />
           <Text style={styles.sectionLabel}>播放速度</Text>
           <View style={styles.speedRow}>{(['0.25', '0.5', '1', '2'] as const).map((speed) => <Pressable key={speed} style={[styles.speedButton, playbackSpeed === speed && styles.speedButtonActive]} onPress={() => setPlaybackSpeed(speed)}><Text style={styles.smallButtonText}>{speed}x</Text></Pressable>)}</View>
           <View style={styles.trajectoryActions}>
-            <Pressable style={[styles.recordButton, recording && styles.stopRecordButton]} onPress={recording ? stopRecording : startRecording}><Text style={styles.armText}>{recording ? '停止并保存录制' : '开始录制'}</Text></Pressable>
+            <Pressable disabled={!recording && playbackActive} style={[styles.recordButton, recording && styles.stopRecordButton, !recording && playbackActive && styles.disabledButton]} onPress={recording ? stopRecording : startRecording}><Text style={styles.armText}>{recording ? '停止并保存录制' : '开始上肢示教录制'}</Text></Pressable>
             <Pressable style={styles.connectButton} onPress={refreshTrajectories}><Text style={styles.connectText}>刷新列表</Text></Pressable>
           </View>
           <View style={styles.trajectoryActions}>
-            <Pressable style={styles.smallButton} onPress={() => controlPlayback('pause')}><Text style={styles.smallButtonText}>暂停</Text></Pressable>
-            <Pressable style={styles.smallButton} onPress={() => controlPlayback('resume')}><Text style={styles.smallButtonText}>继续</Text></Pressable>
+            <Pressable style={[styles.smallButton, bridgeState.playback_state !== 'playing' && styles.disabledButton]} disabled={bridgeState.playback_state !== 'playing'} onPress={() => controlPlayback('pause')}><Text style={styles.smallButtonText}>暂停</Text></Pressable>
+            <Pressable style={[styles.smallButton, bridgeState.playback_state !== 'paused' && styles.disabledButton]} disabled={bridgeState.playback_state !== 'paused'} onPress={() => controlPlayback('resume')}><Text style={styles.smallButtonText}>继续</Text></Pressable>
             <Pressable style={styles.deleteButton} onPress={() => controlPlayback('stop')}><Text style={styles.smallButtonText}>停止</Text></Pressable>
           </View>
+          <View style={styles.activityPanel}>
+            <Text style={styles.activityTitle}>{recording ? `● 正在录制：${bridgeState.recording_name}` : bridgeState.playback_state === 'playing' ? `▶ 正在播放：${bridgeState.playback_name}` : bridgeState.playback_state === 'paused' ? `Ⅱ 已暂停：${bridgeState.playback_name}` : bridgeState.playback_state === 'completed' ? `✓ 播放完成：${bridgeState.playback_name}` : bridgeState.playback_state === 'error' ? `播放失败：${bridgeState.playback_error || '未知错误'}` : '当前空闲'}</Text>
+            <Text style={styles.fieldHint}>{recording ? `${bridgeState.recording_frames} 帧 · ${bridgeState.recording_sample_rate_hz ?? sampleRate} Hz` : `${bridgeState.playback_progress_ms} / ${bridgeState.playback_duration_ms} ms · ${playbackPercent}%`}</Text>
+            <View style={styles.progressTrack}><View style={[styles.progressValue, { width: `${recording ? 100 : playbackPercent}%` }]} /></View>
+          </View>
           <Text style={styles.sectionLabel}>颁奖动作预设</Text>
-          <View style={styles.awardGrid}>{AWARD_PRESETS.map(([name, label]) => <Pressable key={name} style={styles.awardButton} onPress={() => playTrajectory(name)}><Text style={styles.modeText}>{label}</Text></Pressable>)}</View>
-          <Text style={styles.handHint}>{recording ? `录制中：以 ${sampleRate} Hz 采集机械臂和灵巧手实际状态。` : '录制前先进入 TELEOP；播放前也需要保持已解锁。'}</Text>
+          <View style={styles.awardGrid}>{AWARD_PRESETS.map(([name, label]) => { const exists = trajectories.some((item) => item.name === name); const disabled = !exists || playbackActive || recording; return <Pressable key={name} disabled={disabled} style={[styles.awardButton, disabled && styles.disabledButton]} onPress={() => playTrajectory(name)}><Text style={styles.modeText}>{label}{exists ? '' : ' · 未录制'}</Text></Pressable>; })}</View>
+          <Text style={styles.handHint}>{recording ? '机械臂处于仅上肢阻尼示教；腿部不卸力。当前固件没有已确认的灵巧手卸力接口，手指不要强掰。' : '同名轨迹不会再覆盖；每条轨迹可独立播放、改名和删除。'}</Text>
           {trajectories.length === 0 ? <Text style={styles.emptyText}>暂无轨迹</Text> : trajectories.map((trajectory) => <View key={trajectory.name} style={styles.trajectoryRow}>
-            <View style={styles.trajectoryMeta}><Text style={styles.trajectoryTitle}>{trajectory.name}</Text><Text style={styles.fieldHint}>{trajectory.frames} 帧</Text></View>
-            <Pressable style={styles.smallButton} onPress={() => playTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>播放</Text></Pressable>
-            <Pressable style={styles.smallButton} onPress={() => { setSelectedTrajectory(trajectory.name); setTrajectoryName(trajectory.name); }}><Text style={styles.smallButtonText}>编辑</Text></Pressable>
-            <Pressable style={styles.deleteButton} onPress={() => deleteTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>删除</Text></Pressable>
-            {selectedTrajectory === trajectory.name && <Pressable style={styles.smallButton} onPress={() => renameTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>保存名称</Text></Pressable>}
+            <View style={styles.trajectoryMeta}><Text style={styles.trajectoryTitle}>{trajectory.name}</Text><Text style={styles.fieldHint}>{trajectory.frames} 帧 · {(trajectory.duration_ms / 1000).toFixed(1)} 秒 · 臂 {trajectory.arm_joints} / 左手 {trajectory.left_hand_joints} / 右手 {trajectory.right_hand_joints}</Text></View>
+            <Pressable disabled={playbackActive || recording} style={[styles.smallButton, (playbackActive || recording) && styles.disabledButton]} onPress={() => playTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>{bridgeState.playback_name === trajectory.name && bridgeState.playback_state === 'playing' ? '播放中' : bridgeState.playback_name === trajectory.name && bridgeState.playback_state === 'paused' ? '已暂停' : '播放'}</Text></Pressable>
+            <Pressable disabled={playbackActive || recording} style={[styles.smallButton, (playbackActive || recording) && styles.disabledButton]} onPress={() => { setSelectedTrajectory(trajectory.name); setRenameDraft(trajectory.name); }}><Text style={styles.smallButtonText}>改名</Text></Pressable>
+            <Pressable disabled={playbackActive || recording} style={[styles.deleteButton, (playbackActive || recording) && styles.disabledButton]} onPress={() => deleteTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>删除</Text></Pressable>
+            {selectedTrajectory === trajectory.name && <View style={styles.renameRow}><TextInput value={renameDraft} onChangeText={setRenameDraft} style={styles.renameInput} /><Pressable style={styles.smallButton} onPress={() => renameTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>保存</Text></Pressable></View>}
           </View>)}
         </View>}
       </ScrollView>
@@ -480,7 +538,7 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#0b1118' },
   container: { flexGrow: 1, paddingHorizontal: 20, paddingVertical: 16 },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  title: { color: '#f3f7fb', fontSize: 23, fontWeight: '800', letterSpacing: 1.6 },
+  title: { color: '#f3f7fb', fontSize: 23, fontWeight: '800', letterSpacing: 0 },
   subtitle: { color: '#82909d', marginTop: 3, fontSize: 12 },
   statusPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#141e28', borderRadius: 18, paddingHorizontal: 14, paddingVertical: 9 },
   statusDot: { width: 8, height: 8, borderRadius: 4, marginRight: 8 },
@@ -535,13 +593,20 @@ const styles = StyleSheet.create({
   speedButtonActive: { backgroundColor: '#295d8a' },
   awardGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   awardButton: { backgroundColor: '#3b3158', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 12, minWidth: 130, alignItems: 'center', flexGrow: 1 },
+  disabledButton: { opacity: 0.35 },
+  activityPanel: { marginTop: 12, backgroundColor: '#111a23', borderColor: '#273644', borderWidth: 1, borderRadius: 8, padding: 12 },
+  activityTitle: { color: '#dce7ef', fontWeight: '700', fontSize: 13 },
+  progressTrack: { height: 5, backgroundColor: '#243341', borderRadius: 3, marginTop: 8, overflow: 'hidden' },
+  progressValue: { height: 5, backgroundColor: '#48d597', borderRadius: 3 },
   recordButton: { flex: 1, backgroundColor: '#267558', borderRadius: 8, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   stopRecordButton: { backgroundColor: '#8d6330' },
   emptyText: { color: '#687987', textAlign: 'center', paddingVertical: 28 },
-  trajectoryRow: { flexDirection: 'row', alignItems: 'center', gap: 7, borderTopWidth: 1, borderTopColor: '#22303c', paddingVertical: 10 },
+  trajectoryRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 7, borderTopWidth: 1, borderTopColor: '#22303c', paddingVertical: 10 },
   trajectoryMeta: { flex: 1 },
   trajectoryTitle: { color: '#e7edf3', fontWeight: '700', fontSize: 14 },
   smallButton: { backgroundColor: '#295d8a', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 8 },
   deleteButton: { backgroundColor: '#8d3e48', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 8 },
   smallButtonText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  renameRow: { width: '100%', flexDirection: 'row', gap: 8, marginTop: 4 },
+  renameInput: { flex: 1, color: '#e7edf3', backgroundColor: '#111a23', borderColor: '#273644', borderWidth: 1, borderRadius: 7, paddingHorizontal: 10, paddingVertical: 7, fontSize: 12 },
 });

@@ -5,7 +5,7 @@
 录制消息：
 
 ```json
-{"type":"trajectory_record_start","name":"双手递出","sample_rate_hz":20}
+{"type":"trajectory_record_start","name":"双手递出","sample_rate_hz":20,"teach_mode":true}
 ```
 
 `sample_rate_hz` 支持 `1` 到 `100` Hz，默认 `20` Hz。状态帧使用相对录制开始时间的 `t_ms`，机械臂关节按名称保存实际位置、速度和力矩，灵巧手保存实际位置、速度和力矩。
@@ -20,4 +20,12 @@
 
 轨迹默认持久化到 `~/.x2_ps5_teleop/trajectories.json`。移动端轨迹页提供采样频率、播放速度、暂停、继续、停止以及五个独立颁奖动作入口。五个入口要求轨迹名称分别为：`单手抓取`、`单手携带`、`双手接持`、`双手递出`、`收回双手`。
 
-当前实现没有调用全身 `DAMPING_DEFAULT` 或 `ZERO_TORQUE_DEFAULT`。上半身单独卸力仍需现场确认 AimDK 控制器语义后再启用。
+## 真机前提与安全边界
+
+录制示教和播放前，桥接会通过 `/aimdk_5Fmsgs/srv/GetSystemState` 检查系统状态，只有 `Develop_MC` 才允许继续。桥接不会自动迁移系统状态；必须由现场人员在物理急停有人值守时手动切换。测试结束后应按现场流程切回 `Ready`。
+
+示教录制期间，桥接只向 14 个机械臂关节持续发送 `stiffness=0`、`damping=5` 的阻尼命令，不调用全身 `DAMPING_DEFAULT` 或 `ZERO_TORQUE_DEFAULT`，也不发布腿部和腰部命令。停止录制时，机械臂会在测得的当前位置恢复位置保持。录制和播放期间底盘速度强制为零。
+
+当前固件的 `HandCommandArray` 没有已确认的电机卸力字段，桥接不会猜测调用 `SetDcuMotorPowerState`。因此灵巧手只记录状态，不会随录制开始而卸力，现场不得强掰仍上电的手指。
+
+同名轨迹会被拒绝，不会覆盖已有数据。轨迹列表返回名称、帧数、时长以及机械臂和左右手关节数；App 可分别改名和删除多条轨迹。
