@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import json
 import logging
 import math
+from pathlib import Path
 import time
 from typing import Any
 
@@ -65,6 +67,7 @@ class BridgeController:
         source: str = "mobile_app",
         timeout: float = 0.4,
         velocity_limits: tuple[float, float, float] = (0.12, 0.08, 0.15),
+        trajectory_path: str | Path | None = None,
     ):
         if timeout <= 0:
             raise ValueError("timeout 必须大于 0")
@@ -82,14 +85,19 @@ class BridgeController:
         self.last_sequence = -1
         self.last_command_at: float | None = None
         self.lock = asyncio.Lock()
-        # Trajectories are intentionally kept in the bridge process.  A frame
-        # is a protocol command plus the elapsed time from recording start;
-        # this keeps recordings hardware agnostic and makes them portable
-        # between MockRobot and the ROS backend.
-        self.trajectories: dict[str, list[dict[str, Any]]] = {}
+        # Trajectories are persisted as timestamped upper-body state frames.
+        # The MockRobot keeps the legacy event fallback so protocol tests and
+        # development without ROS remain usable.
+        self.trajectory_path = Path(trajectory_path) if trajectory_path else None
+        self.trajectories: dict[str, list[dict[str, Any]]] = self._load_trajectories()
         self.recording_name: str | None = None
         self.recording_frames: list[dict[str, Any]] = []
         self.recording_started_at: float | None = None
+        self.recording_monotonic_started_at: float | None = None
+        self.recording_sample_rate_hz = 20.0
+        self.recording_task: asyncio.Task | None = None
+        self.playback_task: asyncio.Task | None = None
+        self.playback_paused = False
 
     async def register(self, session_id: str, client_id: str) -> str | None:
         """注册控制连接，返回需要被关闭的同 client 旧会话。"""
@@ -178,7 +186,7 @@ class BridgeController:
             elif message_type == "trajectory_rename":
                 self._trajectory_rename_locked(message)
             elif message_type == "trajectory_play":
-                await self._trajectory_play_locked(message, now)
+                await self._trajectory_command_locked(message, now)
             elif message_type == "estop":
                 self._estop_locked()
             elif message_type == "clear_estop":
@@ -208,6 +216,12 @@ class BridgeController:
 
     async def close(self) -> None:
         async with self.lock:
+            if self.recording_task:
+                self.recording_task.cancel()
+                self.recording_task = None
+            if self.playback_task:
+                self.playback_task.cancel()
+                self.playback_task = None
             self._stop_locked()
             self.owner_session = None
             self.owner_client = None
@@ -340,17 +354,30 @@ class BridgeController:
         name = str(message.get("name", "")).strip()
         if not name or len(name) > 80:
             raise BridgeError("invalid_trajectory", "轨迹名称不能为空且不能超过 80 个字符")
+        rate = self._finite_number(message.get("sample_rate_hz", 20.0), "sample_rate_hz")
+        if rate < 1.0 or rate > 100.0:
+            raise BridgeError("invalid_trajectory", "采样频率必须在 1 到 100 Hz 之间")
         self.recording_name = name
         self.recording_frames = []
         self.recording_started_at = now
+        self.recording_monotonic_started_at = time.monotonic()
+        self.recording_sample_rate_hz = rate
+        if self.recording_task:
+            self.recording_task.cancel()
+        self.recording_task = asyncio.create_task(self._recording_loop())
 
     def _trajectory_record_stop_locked(self, now: float) -> None:
         if self.recording_name is None:
             raise BridgeError("not_recording", "当前没有正在录制的轨迹")
         self.trajectories[self.recording_name] = list(self.recording_frames)
+        self._persist_trajectories_locked()
+        if self.recording_task:
+            self.recording_task.cancel()
+            self.recording_task = None
         self.recording_name = None
         self.recording_frames = []
         self.recording_started_at = None
+        self.recording_monotonic_started_at = None
 
     def _trajectory_save_locked(self, message: dict[str, Any]) -> None:
         name = str(message.get("name", "")).strip()
@@ -365,12 +392,14 @@ class BridgeController:
                 raise BridgeError("invalid_trajectory", "轨迹帧格式无效")
             clean.append(dict(frame))
         self.trajectories[name] = clean
+        self._persist_trajectories_locked()
 
     def _trajectory_delete_locked(self, message: dict[str, Any]) -> None:
         name = str(message.get("name", "")).strip()
         if name not in self.trajectories:
             raise BridgeError("trajectory_not_found", "轨迹不存在")
         del self.trajectories[name]
+        self._persist_trajectories_locked()
 
     def _trajectory_rename_locked(self, message: dict[str, Any]) -> None:
         old = str(message.get("old_name", "")).strip()
@@ -380,19 +409,52 @@ class BridgeController:
         if not new or len(new) > 80 or (new != old and new in self.trajectories):
             raise BridgeError("invalid_trajectory", "新名称无效或已存在")
         self.trajectories[new] = self.trajectories.pop(old)
+        self._persist_trajectories_locked()
 
-    async def _trajectory_play_locked(self, message: dict[str, Any], now: float) -> None:
+    async def _trajectory_command_locked(self, message: dict[str, Any], now: float) -> None:
         if not self.armed or self.state != TeleopState.TELEOP:
             raise BridgeError("not_armed", "请先进入 TELEOP")
+        command = str(message.get("command", "start"))
+        if command == "pause":
+            self.playback_paused = True
+            return
+        if command == "resume":
+            self.playback_paused = False
+            return
+        if command == "stop":
+            if self.playback_task:
+                self.playback_task.cancel()
+                self.playback_task = None
+            self.playback_paused = False
+            self._stop_locked()
+            return
         name = str(message.get("name", "")).strip()
         frames = self.trajectories.get(name)
         if frames is None:
             raise BridgeError("trajectory_not_found", "轨迹不存在")
+        speed = self._finite_number(message.get("speed", 1.0), "speed")
+        if speed <= 0 or speed > 4:
+            raise BridgeError("invalid_trajectory", "播放速度必须在 0.01 到 4 倍之间")
+        self.playback_paused = False
+        if self.playback_task:
+            self.playback_task.cancel()
+        self.playback_task = asyncio.create_task(self._trajectory_play_locked(frames, speed, now))
+        # Dispatch zero-time frames before acknowledging the request.
+        await asyncio.sleep(0)
+
+    async def _trajectory_play_locked(self, frames: list[dict[str, Any]], speed: float, now: float) -> None:
         previous_t = 0
         for frame in frames:
             target_t = frame.get("t_ms", previous_t)
             if isinstance(target_t, (int, float)) and target_t >= previous_t:
-                await asyncio.sleep(min(10.0, max(0.0, (float(target_t) - previous_t) / 1000.0)))
+                remaining = min(10.0, max(0.0, (float(target_t) - previous_t) / 1000.0 / speed))
+                while remaining > 0:
+                    if self.playback_paused:
+                        await asyncio.sleep(0.05)
+                        continue
+                    tick = min(0.05, remaining)
+                    await asyncio.sleep(tick)
+                    remaining -= tick
                 previous_t = float(target_t)
             kind = frame.get("type")
             if kind == "velocity":
@@ -403,14 +465,71 @@ class BridgeController:
                 self._preset_locked(frame.get("action"), now)
             elif kind == "hand_target":
                 self._hand_target_locked(frame, now)
+            elif kind == "upper_body":
+                self.robot.upper_body_target(frame)
         self.last_command_at = now
+        self.playback_task = None
 
     def _record_frame_locked(self, payload: dict[str, Any], now: float) -> None:
         if self.recording_name is None or self.recording_started_at is None:
             return
         frame = dict(payload)
         frame["t_ms"] = max(0, int((now - self.recording_started_at) * 1000))
-        self.recording_frames.append(frame)
+        if payload.get("type") in {"velocity", "mode"}:
+            return
+        if payload.get("type") not in {"upper_body"}:
+            sampled = self._append_sample_locked(frame["t_ms"])
+            if sampled is None:
+                # Compatibility fallback for mock/custom backends that do not
+                # expose ROS state sampling; real X2 recordings stay state-only.
+                self.recording_frames.append(frame)
+        else:
+            self.recording_frames.append(frame)
+
+    def _append_sample_locked(self, t_ms: int) -> bool | None:
+        sampler = getattr(self.robot, "upper_body_state", None)
+        if sampler is None:
+            return None
+        state = sampler()
+        if state:
+            self.recording_frames.append({"type": "upper_body", "t_ms": t_ms, **state})
+            return True
+        return False
+
+    async def _recording_loop(self) -> None:
+        """采样实际状态，而不是把手机发出的目标值当作轨迹。"""
+        try:
+            while self.recording_name is not None:
+                await asyncio.sleep(1.0 / self.recording_sample_rate_hz)
+                async with self.lock:
+                    if self.recording_name is None or self.recording_started_at is None:
+                        return
+                    started = self.recording_monotonic_started_at or time.monotonic()
+                    t_ms = max(0, int((time.monotonic() - started) * 1000))
+                    self._append_sample_locked(t_ms)
+        except asyncio.CancelledError:
+            return
+
+    def _load_trajectories(self) -> dict[str, list[dict[str, Any]]]:
+        if not self.trajectory_path or not self.trajectory_path.exists():
+            return {}
+        try:
+            payload = json.loads(self.trajectory_path.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except (OSError, ValueError, TypeError):
+            LOGGER.warning("无法读取轨迹文件: %s", self.trajectory_path)
+            return {}
+
+    def _persist_trajectories_locked(self) -> None:
+        if not self.trajectory_path:
+            return
+        try:
+            self.trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+            temp = self.trajectory_path.with_suffix(self.trajectory_path.suffix + ".tmp")
+            temp.write_text(json.dumps(self.trajectories, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+            temp.replace(self.trajectory_path)
+        except OSError:
+            LOGGER.exception("保存轨迹失败: %s", self.trajectory_path)
 
     def _estop_locked(self) -> None:
         self._stop_locked()

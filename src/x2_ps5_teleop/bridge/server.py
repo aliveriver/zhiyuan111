@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+from pathlib import Path
 import secrets
 import sys
 from typing import Any
@@ -44,7 +45,7 @@ class TeleopBridgeServer:
             await self._send(session_id, {
                 "type": "hello_ack",
                 "protocol_version": PROTOCOL_VERSION,
-                "capabilities": ["velocity", "mode", "preset", "hand_target", "hand_params", "hand_command", "trajectory"],
+                "capabilities": ["velocity", "mode", "preset", "hand_target", "hand_params", "hand_command", "trajectory", "upper_body_trajectory", "trajectory_pause", "trajectory_stop"],
             })
             await self._broadcast()
             async for raw in websocket:
@@ -133,6 +134,7 @@ async def serve(args) -> None:
             settings.mapping.max_linear_y,
             settings.mapping.max_angular_z,
         ),
+        trajectory_path=Path.home() / ".x2_ps5_teleop" / "trajectories.json",
     )
     server = TeleopBridgeServer(controller)
     watchdog = asyncio.create_task(server.watchdog_loop())

@@ -47,6 +47,13 @@ const PRESETS = [
   ['victory', '比个耶'],
   ['thumbs_up', '点个赞'],
 ] as const;
+const AWARD_PRESETS = [
+  ['单手抓取', '单手抓取奖状'],
+  ['单手携带', '单手携带'],
+  ['双手接持', '双手接持'],
+  ['双手递出', '双手递出'],
+  ['收回双手', '收回双手'],
+] as const;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -130,6 +137,8 @@ export default function App() {
   });
   const [trajectories, setTrajectories] = useState<TrajectoryInfo[]>([]);
   const [trajectoryName, setTrajectoryName] = useState('我的轨迹');
+  const [sampleRate, setSampleRate] = useState('20');
+  const [playbackSpeed, setPlaybackSpeed] = useState('1');
   const [selectedTrajectory, setSelectedTrajectory] = useState('');
   const [recording, setRecording] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
@@ -326,7 +335,12 @@ export default function App() {
   const refreshTrajectories = useCallback(() => send({ type: 'trajectory_list' }), [send]);
   const startRecording = () => {
     const name = trajectoryName.trim() || '未命名轨迹';
-    if (send({ type: 'trajectory_record_start', name })) setRecording(true);
+    const rate = Number(sampleRate);
+    if (!Number.isFinite(rate) || rate < 1 || rate > 100) {
+      setStatusText('采样频率需为 1～100 Hz');
+      return;
+    }
+    if (send({ type: 'trajectory_record_start', name, sample_rate_hz: rate })) setRecording(true);
   };
   const stopRecording = () => {
     if (send({ type: 'trajectory_record_stop' })) {
@@ -347,7 +361,15 @@ export default function App() {
       refreshTrajectories();
     }
   };
-  const playTrajectory = (name: string) => send({ type: 'trajectory_play', name });
+  const playTrajectory = (name: string) => {
+    const speed = Number(playbackSpeed);
+    if (!Number.isFinite(speed) || speed <= 0 || speed > 4) {
+      setStatusText('播放速度需为 0.01～4 倍');
+      return;
+    }
+    send({ type: 'trajectory_play', name, speed });
+  };
+  const controlPlayback = (command: 'pause' | 'resume' | 'stop') => send({ type: 'trajectory_play', command });
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -425,11 +447,22 @@ export default function App() {
           </View>
           <Text style={styles.sectionLabel}>轨迹名称</Text>
           <TextInput value={trajectoryName} onChangeText={setTrajectoryName} style={styles.urlInput} placeholder="例如：抓取测试" placeholderTextColor="#6d7885" />
+          <Text style={styles.sectionLabel}>上半身采样频率（Hz）</Text>
+          <TextInput value={sampleRate} onChangeText={setSampleRate} style={styles.rateInput} keyboardType="numeric" placeholder="20" placeholderTextColor="#6d7885" />
+          <Text style={styles.sectionLabel}>播放速度</Text>
+          <View style={styles.speedRow}>{(['0.25', '0.5', '1', '2'] as const).map((speed) => <Pressable key={speed} style={[styles.speedButton, playbackSpeed === speed && styles.speedButtonActive]} onPress={() => setPlaybackSpeed(speed)}><Text style={styles.smallButtonText}>{speed}x</Text></Pressable>)}</View>
           <View style={styles.trajectoryActions}>
             <Pressable style={[styles.recordButton, recording && styles.stopRecordButton]} onPress={recording ? stopRecording : startRecording}><Text style={styles.armText}>{recording ? '停止并保存录制' : '开始录制'}</Text></Pressable>
             <Pressable style={styles.connectButton} onPress={refreshTrajectories}><Text style={styles.connectText}>刷新列表</Text></Pressable>
           </View>
-          <Text style={styles.handHint}>{recording ? '录制中：移动、模式、预设和灵巧手单帧命令都会按时间顺序记录。' : '录制前先进入 TELEOP；播放前也需要保持已解锁。'}</Text>
+          <View style={styles.trajectoryActions}>
+            <Pressable style={styles.smallButton} onPress={() => controlPlayback('pause')}><Text style={styles.smallButtonText}>暂停</Text></Pressable>
+            <Pressable style={styles.smallButton} onPress={() => controlPlayback('resume')}><Text style={styles.smallButtonText}>继续</Text></Pressable>
+            <Pressable style={styles.deleteButton} onPress={() => controlPlayback('stop')}><Text style={styles.smallButtonText}>停止</Text></Pressable>
+          </View>
+          <Text style={styles.sectionLabel}>颁奖动作预设</Text>
+          <View style={styles.awardGrid}>{AWARD_PRESETS.map(([name, label]) => <Pressable key={name} style={styles.awardButton} onPress={() => playTrajectory(name)}><Text style={styles.modeText}>{label}</Text></Pressable>)}</View>
+          <Text style={styles.handHint}>{recording ? `录制中：以 ${sampleRate} Hz 采集机械臂和灵巧手实际状态。` : '录制前先进入 TELEOP；播放前也需要保持已解锁。'}</Text>
           {trajectories.length === 0 ? <Text style={styles.emptyText}>暂无轨迹</Text> : trajectories.map((trajectory) => <View key={trajectory.name} style={styles.trajectoryRow}>
             <View style={styles.trajectoryMeta}><Text style={styles.trajectoryTitle}>{trajectory.name}</Text><Text style={styles.fieldHint}>{trajectory.frames} 帧</Text></View>
             <Pressable style={styles.smallButton} onPress={() => playTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>播放</Text></Pressable>
@@ -454,6 +487,7 @@ const styles = StyleSheet.create({
   statusText: { color: '#d8e0e8', fontSize: 13 },
   connectionRow: { flexDirection: 'row', alignItems: 'center', marginTop: 14, gap: 8 },
   urlInput: { flex: 1, color: '#e7edf3', backgroundColor: '#111a23', borderColor: '#273644', borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9, fontSize: 13 },
+  rateInput: { color: '#e7edf3', backgroundColor: '#111a23', borderColor: '#273644', borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9, fontSize: 13, width: 120 },
   connectButton: { backgroundColor: '#295d8a', paddingHorizontal: 18, paddingVertical: 10, borderRadius: 8 },
   connectText: { color: '#fff', fontWeight: '700' },
   stateText: { color: '#9fabb8', minWidth: 128, textAlign: 'right', fontSize: 13 },
@@ -496,6 +530,11 @@ const styles = StyleSheet.create({
   jointInput: { flex: 1, minWidth: 0, color: '#e7edf3', backgroundColor: '#111a23', borderColor: '#273644', borderWidth: 1, borderRadius: 7, paddingHorizontal: 8, paddingVertical: 8, fontSize: 12 },
   sendHandButton: { backgroundColor: '#267558', borderRadius: 8, alignItems: 'center', justifyContent: 'center', minHeight: 44, marginTop: 8 },
   trajectoryActions: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  speedRow: { flexDirection: 'row', gap: 8, marginBottom: 4 },
+  speedButton: { backgroundColor: '#1a2e3f', borderRadius: 6, paddingHorizontal: 14, paddingVertical: 9 },
+  speedButtonActive: { backgroundColor: '#295d8a' },
+  awardGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  awardButton: { backgroundColor: '#3b3158', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 12, minWidth: 130, alignItems: 'center', flexGrow: 1 },
   recordButton: { flex: 1, backgroundColor: '#267558', borderRadius: 8, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   stopRecordButton: { backgroundColor: '#8d6330' },
   emptyText: { color: '#687987', textAlign: 'center', paddingVertical: 28 },

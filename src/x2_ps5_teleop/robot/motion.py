@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 import sys
-from typing import TextIO
+from typing import Any, TextIO
 
 from ..core import HandAction, Mode
 
@@ -35,6 +36,9 @@ class RobotInterface:
     def set_mode(self, mode: Mode) -> None: ...
     def hand_action(self, action: HandAction) -> None: ...
     def hand_target(self, side: str, joints: list[tuple[int, float, float, float, float, float]]) -> None: ...
+    def arm_target(self, joints: list[dict[str, Any]]) -> None: ...
+    def upper_body_target(self, frame: dict[str, Any]) -> None: ...
+    def upper_body_state(self) -> dict[str, Any] | None: ...
     def close(self) -> None: ...
 
 
@@ -57,6 +61,15 @@ class MockRobot(RobotInterface):
     def hand_target(self, side: str, joints: list[tuple[int, float, float, float, float, float]]) -> None:
         print(f"HAND TARGET side={side} joints={len(joints)}", file=self.stream, flush=True)
 
+    def arm_target(self, joints: list[dict[str, Any]]) -> None:
+        print(f"ARM TARGET joints={len(joints)}", file=self.stream, flush=True)
+
+    def upper_body_target(self, frame: dict[str, Any]) -> None:
+        self.arm_target(frame.get("arm", []))
+
+    def upper_body_state(self) -> dict[str, Any] | None:
+        return None
+
     def close(self) -> None:
         self.stop()
 
@@ -77,6 +90,7 @@ class X2RosRobot(RobotInterface):
             if common_aimdk not in sys.path:
                 sys.path.insert(0, common_aimdk)
             import rclpy
+            from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
             from aimdk_msgs.msg import (
                 McLocomotionVelocity,
                 McActionCommand,
@@ -86,14 +100,20 @@ class X2RosRobot(RobotInterface):
                 HandCommand,
                 MessageHeader,
                 RequestHeader,
+                JointCommandArray,
+                JointCommand,
+                JointStateArray,
+                HandStateArray,
             )
             from aimdk_msgs.srv import SetMcAction, SetMcInputSource, GetHandType
             from aimdk_msgs.msg import McInputAction, McInputSource
         except ImportError as exc:  # pragma: no cover - 仅在 ROS 主机上执行
             raise RuntimeError("X2 模式需要开发计算机上的 ROS 2 Humble 和 aimdk_msgs") from exc
         self._rclpy = rclpy
+        self._state_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
         self._msg = (McLocomotionVelocity, McActionCommand, McControlArea, McPresetMotion,
-                     MessageHeader, RequestHeader, HandCommandArray, HandCommand)
+                     MessageHeader, RequestHeader, HandCommandArray, HandCommand,
+                     JointCommandArray, JointCommand, JointStateArray, HandStateArray)
         self._srv = (SetMcAction, SetMcInputSource, GetHandType)
         self._input_types = (McInputAction, McInputSource)
         if not rclpy.ok():
@@ -104,6 +124,11 @@ class X2RosRobot(RobotInterface):
         self.preset_actions = preset_actions or PRESET_ACTIONS
         self.velocity_pub = self.node.create_publisher(McLocomotionVelocity, "/aima/mc/locomotion/velocity", 10)
         self.hand_pub = self.node.create_publisher(HandCommandArray, "/aima/hal/joint/hand/command", 10)
+        self.arm_pub = self.node.create_publisher(JointCommandArray, "/aima/hal/joint/arm/command", 10)
+        self._arm_state: Any = None
+        self._hand_state: Any = None
+        self.node.create_subscription(JointStateArray, "/aima/hal/joint/arm/state", self._on_arm_state, self._state_qos)
+        self.node.create_subscription(HandStateArray, "/aima/hal/joint/hand/state", self._on_hand_state, self._state_qos)
         self.mode_client = self.node.create_client(SetMcAction, "/aimdk_5Fmsgs/srv/SetMcAction")
         self.source_client = self.node.create_client(SetMcInputSource, "/aimdk_5Fmsgs/srv/SetMcInputSource")
         self.hand_type_client = self.node.create_client(GetHandType, "/aimdk_5Fmsgs/srv/GetHandType")
@@ -226,6 +251,62 @@ class X2RosRobot(RobotInterface):
         else:
             msg.right_hands, msg.left_hands = hands, [self._hand_command("left", i, 0.0, 0.1, 0.0, 0.0, 0.0) for i in range(HAND_SLOT_COUNT)]
         self.hand_pub.publish(msg)
+
+    def _on_arm_state(self, msg) -> None:
+        self._arm_state = msg
+
+    def _on_hand_state(self, msg) -> None:
+        self._hand_state = msg
+
+    def upper_body_state(self) -> dict[str, Any] | None:
+        if not self._rclpy.ok():
+            return None
+        self._rclpy.spin_once(self.node, timeout_sec=0.0)
+        if self._arm_state is None and self._hand_state is None:
+            return None
+        def joints(values):
+            return [{"name": str(item.name), "position": float(item.position), "velocity": float(getattr(item, "velocity", 0.0)),
+                     "effort": float(getattr(item, "effort", 0.0))} for item in (values or [])]
+        return {
+            "arm": joints(getattr(self._arm_state, "joints", [])),
+            "left_hand": joints(getattr(self._hand_state, "left_hands", [])),
+            "right_hand": joints(getattr(self._hand_state, "right_hands", [])),
+        }
+
+    def arm_target(self, joints: list[dict[str, Any]]) -> None:
+        msg = self._msg[8]()
+        msg.header = self._msg[4]()
+        msg.header.stamp = self._now().to_msg()
+        msg.header.frame_id = "arm_command"
+        msg.joints = []
+        for item in joints:
+            cmd = self._msg[9]()
+            cmd.name = str(item["name"])
+            cmd.position = float(item.get("position", 0.0))
+            cmd.velocity = float(item.get("velocity", 0.0))
+            cmd.effort = float(item.get("effort", 0.0))
+            cmd.stiffness = float(item.get("stiffness", 0.0))
+            cmd.damping = float(item.get("damping", 0.0))
+            msg.joints.append(cmd)
+        self.arm_pub.publish(msg)
+
+    def upper_body_target(self, frame: dict[str, Any]) -> None:
+        # Both publishers use the same ROS clock tick.  The bridge never
+        # interleaves frames, so a pair of arm/hand messages is one logical
+        # synchronized upper-body frame without touching leg or waist topics.
+        self.arm_target(frame.get("arm", []))
+        left = frame.get("left_hand", [])
+        right = frame.get("right_hand", [])
+        if left or right:
+            msg = self._msg[6]()
+            msg.header = self._msg[4]()
+            msg.header.stamp = self._now().to_msg()
+            msg.header.frame_id = "hand_command"
+            msg.left_hand_type.value = 1
+            msg.right_hand_type.value = 1
+            msg.left_hands = [self._hand_command("left", i, float(item.get("position", 0.0)), float(item.get("velocity", 0.1)), 0.0, 0.0, float(item.get("effort", 0.0))) for i, item in enumerate(left)]
+            msg.right_hands = [self._hand_command("right", i, float(item.get("position", 0.0)), float(item.get("velocity", 0.1)), 0.0, 0.0, float(item.get("effort", 0.0))) for i, item in enumerate(right)]
+            self.hand_pub.publish(msg)
 
     def _hand_command(self, side: str, index: int, position: float, velocity: float = 0.1, acceleration: float = 0.0, deceleration: float = 0.0, effort: float = 0.0):
         cmd = self._msg[7]()
