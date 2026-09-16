@@ -6,6 +6,8 @@ X2 Ultra v0.9.7 的当前操作与部署请以 [App 使用手册](docs/APP_USER_
 [PC2 部署手册](docs/PC2_DEPLOYMENT.md) 为准。支持不卸力的上肢状态录制与手部位置预设管理；
 真机手部五参数与位置预设执行已恢复；上肢轨迹回放仍受保护，Mock 支持流程验证。不会停止官方 MC 或抢占 HAL 手臂输出。
 
+开发者对接从 [对接文档](docs/INTEGRATION_GUIDE.md) 开始；设备、固件、运控、灵巧手和安全边界汇总在 [X2 知识库](docs/X2_KNOWLEDGE_BASE.md)。
+
 ```text
 DualSense 蓝牙 -> 输入读取器 -> IDLE/TELEOP 状态机 -> Mock 或 AimDK ROS 2
 ```
