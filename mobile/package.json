@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@react-native-community/slider": "5.2.0",
     "expo": "~57.0.22",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",

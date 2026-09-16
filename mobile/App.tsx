@@ -14,9 +14,35 @@ import {
   View,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import Slider from '@react-native-community/slider';
 
-type ControlCapabilities = { backend: string; hand_position: boolean; upper_body_playback: boolean; teaching: boolean; reason: string };
+// Official HAL active-axis order, also present in v0.9.7 animation_player.yaml.
+const HAND_JOINTS = [
+  ['thumb_roll_joint', '拇指 · 根部旋转'],
+  ['thumb_abad_joint', '拇指 · 侧摆（外展／内收）'],
+  ['thumb_mcp_joint', '拇指 · 掌指关节屈伸'],
+  ['index_abad_joint', '食指 · 侧摆（外展／内收）'],
+  ['index_pip_joint', '食指 · 屈伸'],
+  ['middle_pip_joint', '中指 · 屈伸'],
+  ['ring_abad_joint', '无名指 · 侧摆（外展／内收）'],
+  ['ring_pip_joint', '无名指 · 屈伸'],
+  ['pinky_abad_joint', '小指 · 侧摆（外展／内收）'],
+  ['pinky_pip_joint', '小指 · 屈伸'],
+] as const;
+
+type ControlCapabilities = { backend: string; hand_position: boolean; upper_body_playback: boolean; teaching: boolean; reason: string; playback_backend?: string; playback_progress_estimated?: boolean; max_playback_speed?: number };
 type HandPose = { name: string; side: 'left' | 'right'; positions: number[]; requires_confirmation: boolean };
+type HandField = 'position' | 'velocity' | 'acceleration' | 'deceleration' | 'effort';
+const HAND_FIELDS: Array<{ key: HandField; label: string; min: number; max: number }> = [
+  { key: 'position', label: '位置', min: -1, max: 1 },
+  { key: 'velocity', label: '速度', min: 0, max: 1 },
+  { key: 'acceleration', label: '加速度', min: 0, max: 10 },
+  { key: 'deceleration', label: '减速度', min: 0, max: 10 },
+  { key: 'effort', label: 'effort', min: -1, max: 1 },
+];
+const initialHandParameters = () => Array.from({ length: 10 }, () => ({
+  position: '0', velocity: '0.1', acceleration: '0', deceleration: '0', effort: '0',
+}));
 type Motion = { forward: number; lateral: number; angular: number };
 type BridgeState = {
   state: string;
@@ -27,7 +53,7 @@ type BridgeState = {
   recording_name: string | null;
   recording_frames: number;
   recording_sample_rate_hz: number | null;
-  playback_state: 'idle' | 'playing' | 'paused' | 'completed' | 'error';
+  playback_state: 'idle' | 'preparing' | 'playing' | 'pausing' | 'paused' | 'stopping' | 'stop_failed' | 'completed' | 'error';
   playback_name: string | null;
   playback_progress_ms: number;
   playback_duration_ms: number;
@@ -56,6 +82,30 @@ const AWARD_PRESETS = [
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function HandSlider({ label, value, min, max, unit = '', onChange }: {
+  label: string; value: string; min: number; max: number; unit?: string; onChange: (value: string) => void;
+}) {
+  const parsed = Number(value);
+  const valid = value.trim() !== '' && Number.isFinite(parsed);
+  const outside = !valid || parsed < min || parsed > max;
+  return <View style={styles.sliderField}>
+    <View style={styles.sliderLabelRow}>
+      <Text style={styles.fieldLabel}>{label}</Text>
+      <Text style={styles.sliderValue}>{valid ? parsed.toFixed(3) : '无效值'} {unit}</Text>
+    </View>
+    <Slider style={styles.handSlider} accessibilityLabel={label}
+      minimumValue={min} maximumValue={max} step={0.001}
+      value={valid ? clamp(parsed, min, max) : min}
+      minimumTrackTintColor="#48d597" maximumTrackTintColor="#405264" thumbTintColor="#79e3b5"
+      onValueChange={(next) => onChange(String(clamp(Number(next.toFixed(3)), min, max)))} />
+    <View style={styles.sliderLabelRow}>
+      <Text style={styles.fieldHint}>{min.toFixed(3)}</Text>
+      <Text style={styles.fieldHint}>{max.toFixed(3)}</Text>
+    </View>
+    {outside ? <Text style={styles.handHint}>当前值超出滑条范围，尚未改写；拖动后才更新目标。</Text> : null}
+  </View>;
 }
 
 function bridgeStateFrom(payload: Partial<BridgeState>, fallback: BridgeState): BridgeState {
@@ -150,6 +200,10 @@ export default function App() {
   const rightStickRef = useRef<JoystickValue>({ x: 0, y: 0 });
   const [page, setPage] = useState<'move' | 'hand' | 'trajectory'>('move');
   const [handSide, setHandSide] = useState<'left' | 'right'>('left');
+  const [handEditor, setHandEditor] = useState<'parameters' | 'positions'>('parameters');
+  const [handParameters, setHandParameters] = useState<Record<'left' | 'right', Record<HandField, string>[]>>({
+    left: initialHandParameters(), right: initialHandParameters(),
+  });
   const [handTargets, setHandTargets] = useState<Record<'left' | 'right', string[]>>({
     left: Array(10).fill('0'), right: Array(10).fill('0'),
   });
@@ -161,7 +215,7 @@ export default function App() {
   const [trajectories, setTrajectories] = useState<TrajectoryInfo[]>([]);
   const [trajectoryName, setTrajectoryName] = useState('');
   const [sampleRate, setSampleRate] = useState('20');
-  const [playbackSpeed, setPlaybackSpeed] = useState('1');
+  const [playbackSpeed, setPlaybackSpeed] = useState('0.25');
   const [selectedTrajectory, setSelectedTrajectory] = useState('');
   const [renameDraft, setRenameDraft] = useState('');
   const recording = bridgeState.recording_name !== null;
@@ -173,6 +227,16 @@ export default function App() {
   const armedRef = useRef(false);
   const lastHeartbeatRef = useRef(0);
   const motionRef = useRef<Motion>({ forward: 0, lateral: 0, angular: 0 });
+
+  useEffect(() => {
+    if (bridgeState.recording_name !== null || ['preparing', 'playing', 'pausing', 'paused', 'stopping', 'stop_failed'].includes(bridgeState.playback_state)) {
+      leftStickRef.current = { x: 0, y: 0 };
+      rightStickRef.current = { x: 0, y: 0 };
+      motionRef.current = { forward: 0, lateral: 0, angular: 0 };
+      setLeftStick({ x: 0, y: 0 });
+      setRightStick({ x: 0, y: 0 });
+    }
+  }, [bridgeState.playback_state, bridgeState.recording_name]);
 
   const updateMotion = useCallback((left: JoystickValue, right: JoystickValue) => {
     motionRef.current = { forward: left.y * 0.12, lateral: left.x * 0.08, angular: right.x * 0.15 };
@@ -333,6 +397,7 @@ export default function App() {
 
   useEffect(() => {
     if (bridgeState.playback_state === 'completed') setStatusText(`播放完成：${bridgeState.playback_name || ''}`);
+    if (bridgeState.playback_state === 'stop_failed') setStatusText('停止未确认：请现场使用物理急停');
     if (bridgeState.playback_state === 'error') setStatusText(bridgeState.playback_error || '轨迹播放失败');
   }, [bridgeState.playback_error, bridgeState.playback_name, bridgeState.playback_state]);
 
@@ -362,6 +427,24 @@ export default function App() {
     }
   };
 
+  const sendHandParameters = () => {
+    const inputs = handParameters[handSide];
+    for (const joint of inputs) {
+      for (const field of HAND_FIELDS) {
+        const value = Number(joint[field.key]);
+        if (!joint[field.key].trim() || !Number.isFinite(value) || value < field.min || value > field.max) {
+          setStatusText(`${field.label}需为 ${field.min}～${field.max} 的有限数字`);
+          return;
+        }
+      }
+    }
+    const joints = inputs.map((joint, index) => ({ index,
+      position: Number(joint.position), velocity: Number(joint.velocity),
+      acceleration: Number(joint.acceleration), deceleration: Number(joint.deceleration),
+      effort: Number(joint.effort),
+    }));
+    send({ type: 'hand_target', side: handSide, joints });
+  };
   const handPositions = (): number[] | null => {
     const inputs = handTargets[handSide];
     const positions = inputs.map(Number);
@@ -434,7 +517,12 @@ export default function App() {
   const playbackPercent = bridgeState.playback_duration_ms > 0
     ? Math.min(100, Math.round(bridgeState.playback_progress_ms * 100 / bridgeState.playback_duration_ms))
     : 0;
-  const playbackActive = bridgeState.playback_state === 'playing' || bridgeState.playback_state === 'paused';
+  const playbackActive = ['preparing', 'playing', 'pausing', 'paused', 'stopping', 'stop_failed'].includes(bridgeState.playback_state);
+  const playbackLabels: Record<BridgeState['playback_state'], string> = {
+    idle: '当前空闲', preparing: '准备中：校验、上传或等待 MC 启动', playing: '正在播放',
+    pausing: '暂停中：等待停止反馈', paused: '已暂停并确认保持', stopping: '停止中：等待反馈',
+    stop_failed: '停止未确认：保持互锁，请现场使用物理急停', completed: '播放完成', error: '播放失败',
+  };
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -466,29 +554,29 @@ export default function App() {
         </View>
 
         {page === 'move' ? <View style={[styles.mainRow, compactLayout && styles.mainRowCompact]}>
-          <View style={styles.controlPanel}>
+          <View pointerEvents={playbackActive || recording ? "none" : "auto"} style={styles.controlPanel}>
             <Joystick label="前进 / 后退 / 横移" value={leftStick} onChange={setLeft} />
             <Joystick label="旋转（左 / 右）" value={rightStick} onChange={setRight} />
           </View>
           <View style={[styles.actionPanel, compactLayout && styles.actionPanelCompact]}>
             <View style={styles.armRow}>
-              <Pressable style={[styles.armButton, bridgeState.armed && styles.disarmButton]} onPress={arm}>
+              <Pressable style={[styles.armButton, bridgeState.armed && styles.disarmButton]} disabled={!bridgeState.armed && playbackActive} onPress={arm}>
                 <Text style={styles.armText}>{bridgeState.armed ? '退出 TELEOP' : '进入 TELEOP'}</Text>
               </Pressable>
               <Pressable style={styles.estopButton} onPress={emergencyStop}><Text style={styles.estopText}>急停</Text></Pressable>
             </View>
             <Text style={styles.sectionLabel}>运动模式</Text>
             <View style={styles.buttonGrid}>
-              {MODES.map(([mode, label]) => <Pressable key={mode} style={styles.modeButton} onPress={() => send({ type: 'mode', mode })}><Text style={styles.modeText}>{label}</Text></Pressable>)}
+              {MODES.map(([mode, label]) => <Pressable key={mode} disabled={playbackActive || recording} style={[styles.modeButton, (playbackActive || recording) && styles.disabledButton]} onPress={() => send({ type: 'mode', mode })}><Text style={styles.modeText}>{label}</Text></Pressable>)}
             </View>
             <Text style={styles.sectionLabel}>携带奖状</Text>
             <Text style={styles.handHint}>抓稳后由人工使用官方行走；此阶段不播放或保持手臂轨迹。松手请到灵巧手预设页确认执行。</Text>
             <Pressable style={styles.presetButton} onPress={() => { setPage('hand'); send({ type: 'hand_pose_list' }); }}><Text style={styles.modeText}>选择手部抓握预设</Text></Pressable>
-            <Text style={styles.hint}>松开摇杆立即发零速度；切后台或断网会自动停车。</Text>
+            <Text style={styles.hint}>松开摇杆发送零速度；切后台或断网会请求停止。MC 动画须确认停止反馈，通信中断时使用现场物理急停。</Text>
           </View>
         </View> : page === 'hand' ? <View style={styles.handPanel}>
           <View style={styles.armRow}>
-            <Pressable style={[styles.armButton, bridgeState.armed && styles.disarmButton]} onPress={arm}>
+            <Pressable style={[styles.armButton, bridgeState.armed && styles.disarmButton]} disabled={!bridgeState.armed && playbackActive} onPress={arm}>
               <Text style={styles.armText}>{bridgeState.armed ? '退出 TELEOP' : '进入 TELEOP'}</Text>
             </Pressable>
             <Pressable style={styles.estopButton} onPress={emergencyStop}><Text style={styles.estopText}>急停</Text></Pressable>
@@ -496,14 +584,35 @@ export default function App() {
           <View style={styles.sideSwitch}>
             {(['left', 'right'] as const).map((side) => <Pressable key={side} style={[styles.sideButton, handSide === side && styles.sideButtonActive]} onPress={() => setHandSide(side)}><Text style={styles.sideText}>{side === 'left' ? '左手' : '右手'}</Text></Pressable>)}
           </View>
-          <Text style={styles.handHint}>仅编辑位置（rad），不卸力、不设置未确认的速度或力度。±π rad 是编辑范围，不是硬件安全限位。左右手使用各自反馈符号。</Text>
+          <View style={styles.sideSwitch}>
+            {(['parameters', 'positions'] as const).map((editor) => <Pressable key={editor} style={[styles.sideButton, handEditor === editor && styles.sideButtonActive]} onPress={() => setHandEditor(editor)}><Text style={styles.sideText}>{editor === 'parameters' ? '旧版五参数' : '反馈位置与预设'}</Text></Pressable>)}
+          </View>
+          {handEditor === 'parameters' ? <>
+            <Text style={styles.handHint}>恢复原版参数与发送方式：左手前三槽位置由程序取反，其余原样发送。以下为输入范围，不是硬件限位；effort 等字段是否生效由手部固件决定，不代表已支持力控或卸力。初始零值不是已标定的张开姿态。</Text>
+            <Text style={styles.handHint}>拖动只编辑目标，点击下方发送按钮才驱动所选手。每槽对应一个主动自由度，其他耦合关节随动。</Text>
+              {handParameters[handSide].map((joint, index) => <View key={index} style={styles.handJointCard}>
+                <Text style={styles.trajectoryTitle}>{handSide === 'left' ? '左手' : '右手'} · {HAND_JOINTS[index][1]}</Text>
+                <Text style={styles.fieldHint}>槽 {index} · {HAND_JOINTS[index][0]}</Text>
+                {HAND_FIELDS.map((field) => <HandSlider key={field.key}
+                  label={`${HAND_JOINTS[index][1]} · ${field.label}`} value={joint[field.key]}
+                  min={field.min} max={field.max} unit={field.key === 'position' ? 'rad' : ''}
+                  onChange={(value) => setHandParameters((current) => ({
+                    ...current, [handSide]: current[handSide].map((item, i) => i === index ? { ...item, [field.key]: value } : item),
+                  }))} />)}
+              </View>)}
+            <Pressable disabled={!canSendHand || !bridgeState.armed || playbackActive} style={[styles.sendHandButton, (!canSendHand || !bridgeState.armed || playbackActive) && styles.disabledButton]} onPress={sendHandParameters}><Text style={styles.armText}>发送所选手的参数目标</Text></Pressable>
+            <Text style={styles.fieldHint}>{bridgeState.last_hand_command || '尚未发送手部目标'}</Text>
+          </> : <>
+          <Text style={styles.handHint}>位置单位 rad，直接使用反馈符号，不做左手取反。±π rad 是编辑范围，不是硬件安全限位。此处的预设只保存位置。</Text>
           <Pressable style={styles.smallButton} onPress={() => send({ type: 'hand_state' })}><Text style={styles.smallButtonText}>读取当前双手位置</Text></Pressable>
-          {handTargets[handSide].map((position, index) => <View key={index} style={styles.jointRow}>
-            <Text style={styles.jointName}>关节 {index + 1}</Text>
-            <TextInput value={position} onChangeText={(value) => setHandTargets((current) => ({ ...current,
+          <Text style={styles.handHint}>拖动只编辑目标，读取和载入预设也不会自动发送。</Text>
+          {handTargets[handSide].map((position, index) => <View key={index} style={styles.handJointCard}>
+            <Text style={styles.trajectoryTitle}>{handSide === 'left' ? '左手' : '右手'} · {HAND_JOINTS[index][1]}</Text>
+            <Text style={styles.fieldHint}>槽 {index} · {HAND_JOINTS[index][0]}</Text>
+            <HandSlider label={`${HAND_JOINTS[index][1]} · 位置`} value={position} min={-Math.PI} max={Math.PI} unit="rad"
+              onChange={(value) => setHandTargets((current) => ({ ...current,
               [handSide]: current[handSide].map((x, i) => i === index ? value : x),
-            }))} keyboardType="numeric" style={styles.jointInput} />
-            <Text style={styles.fieldHint}>rad</Text>
+            }))} />
           </View>)}
           <Pressable disabled={!canSendHand || !bridgeState.armed || playbackActive} style={[styles.sendHandButton, (!canSendHand || !bridgeState.armed || playbackActive) && styles.disabledButton]} onPress={sendHandTarget}><Text style={styles.armText}>发送所选手的位置目标</Text></Pressable>
           <Text style={styles.sectionLabel}>保存手部预设</Text>
@@ -521,9 +630,10 @@ export default function App() {
             <Pressable style={styles.smallButton} onPress={() => send({ type: 'hand_pose_rename', name: pose.name, new_name: handPoseName.trim() })}><Text style={styles.smallButtonText}>改为输入名称</Text></Pressable>
             <Pressable style={styles.deleteButton} onPress={() => Alert.alert('删除手部预设', `删除“${pose.name}”？`, [{ text: '取消' }, { text: '删除', style: 'destructive', onPress: () => send({ type: 'hand_pose_delete', name: pose.name }) }])}><Text style={styles.smallButtonText}>删除</Text></Pressable>
           </View>)}
+          </>}
         </View> : <View style={styles.handPanel}>
           <View style={styles.armRow}>
-            <Pressable style={[styles.armButton, bridgeState.armed && styles.disarmButton]} onPress={arm}><Text style={styles.armText}>{bridgeState.armed ? '退出 TELEOP' : '进入 TELEOP'}</Text></Pressable>
+            <Pressable style={[styles.armButton, bridgeState.armed && styles.disarmButton]} disabled={!bridgeState.armed && playbackActive} onPress={arm}><Text style={styles.armText}>{bridgeState.armed ? '退出 TELEOP' : '进入 TELEOP'}</Text></Pressable>
             <Pressable style={styles.estopButton} onPress={emergencyStop}><Text style={styles.estopText}>急停</Text></Pressable>
           </View>
           <Text style={styles.sectionLabel}>轨迹名称</Text>
@@ -531,7 +641,7 @@ export default function App() {
           <Text style={styles.sectionLabel}>上半身采样频率（Hz）</Text>
           <TextInput value={sampleRate} onChangeText={setSampleRate} style={styles.rateInput} keyboardType="numeric" placeholder="20" placeholderTextColor="#6d7885" />
           <Text style={styles.sectionLabel}>播放速度</Text>
-          <View style={styles.speedRow}>{(['0.25', '0.5', '1', '2'] as const).map((speed) => <Pressable key={speed} style={[styles.speedButton, playbackSpeed === speed && styles.speedButtonActive]} onPress={() => setPlaybackSpeed(speed)}><Text style={styles.smallButtonText}>{speed}x</Text></Pressable>)}</View>
+          <View style={styles.speedRow}>{(['0.25', '0.5', '1', '2'] as const).map((speed) => <Pressable key={speed} disabled={playbackActive || Number(speed) > (bridgeState.control_capabilities?.max_playback_speed ?? 4)} style={[(playbackActive || Number(speed) > (bridgeState.control_capabilities?.max_playback_speed ?? 4)) && styles.disabledButton, styles.speedButton, playbackSpeed === speed && styles.speedButtonActive]} onPress={() => setPlaybackSpeed(speed)}><Text style={styles.smallButtonText}>{speed}x</Text></Pressable>)}</View>
           <View style={styles.trajectoryActions}>
             <Pressable disabled={!recording && playbackActive} style={[styles.recordButton, recording && styles.stopRecordButton, !recording && playbackActive && styles.disabledButton]} onPress={recording ? stopRecording : startRecording}><Text style={styles.armText}>{recording ? '停止并保存录制' : '开始上肢状态录制'}</Text></Pressable>
             <Pressable style={styles.connectButton} onPress={refreshTrajectories}><Text style={styles.connectText}>刷新列表</Text></Pressable>
@@ -539,11 +649,12 @@ export default function App() {
           <View style={styles.trajectoryActions}>
             <Pressable style={[styles.smallButton, bridgeState.playback_state !== 'playing' && styles.disabledButton]} disabled={bridgeState.playback_state !== 'playing'} onPress={() => controlPlayback('pause')}><Text style={styles.smallButtonText}>暂停</Text></Pressable>
             <Pressable style={[styles.smallButton, bridgeState.playback_state !== 'paused' && styles.disabledButton]} disabled={bridgeState.playback_state !== 'paused'} onPress={() => controlPlayback('resume')}><Text style={styles.smallButtonText}>继续</Text></Pressable>
-            <Pressable style={styles.deleteButton} onPress={() => controlPlayback('stop')}><Text style={styles.smallButtonText}>停止</Text></Pressable>
+            <Pressable style={styles.deleteButton} onPress={() => controlPlayback('stop')}><Text style={styles.smallButtonText}>{bridgeState.playback_state === 'stop_failed' ? '重试停止' : '停止'}</Text></Pressable>
           </View>
           <View style={styles.activityPanel}>
-            <Text style={styles.activityTitle}>{recording ? `● 正在录制：${bridgeState.recording_name}` : bridgeState.playback_state === 'playing' ? `▶ 正在播放：${bridgeState.playback_name}` : bridgeState.playback_state === 'paused' ? `Ⅱ 已暂停：${bridgeState.playback_name}` : bridgeState.playback_state === 'completed' ? `✓ 播放完成：${bridgeState.playback_name}` : bridgeState.playback_state === 'error' ? `播放失败：${bridgeState.playback_error || '未知错误'}` : '当前空闲'}</Text>
-            <Text style={styles.fieldHint}>{recording ? `${bridgeState.recording_frames} 帧 · ${bridgeState.recording_sample_rate_hz ?? sampleRate} Hz` : `${bridgeState.playback_progress_ms} / ${bridgeState.playback_duration_ms} ms · ${playbackPercent}%`}</Text>
+            <Text style={styles.activityTitle}>{recording ? `● 正在录制：${bridgeState.recording_name}` : `${playbackLabels[bridgeState.playback_state]} ${bridgeState.playback_name || ''}`}</Text>
+            {bridgeState.playback_error ? <Text style={styles.handHint}>{bridgeState.playback_error}</Text> : null}
+            <Text style={styles.fieldHint}>{recording ? `${bridgeState.recording_frames} 帧 · ${bridgeState.recording_sample_rate_hz ?? sampleRate} Hz` : `${bridgeState.control_capabilities?.playback_progress_estimated ? '估算进度 · ' : ''}${bridgeState.playback_progress_ms} / ${bridgeState.playback_duration_ms} ms · ${playbackPercent}%`}</Text>
             <View style={styles.progressTrack}><View style={[styles.progressValue, { width: `${recording ? 100 : playbackPercent}%` }]} /></View>
           </View>
           {bridgeState.recording_error ? <Text style={styles.handHint}>{bridgeState.recording_error}</Text> : null}
@@ -604,6 +715,11 @@ const styles = StyleSheet.create({
   modeText: { color: '#dce7ef', fontSize: 13, fontWeight: '600' },
   hint: { color: '#667684', fontSize: 11, marginTop: 'auto', paddingTop: 12 },
   handPanel: { marginTop: 16, backgroundColor: '#101923', borderColor: '#1d2a37', borderWidth: 1, borderRadius: 12, padding: 16 },
+  handJointCard: { paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#273644' },
+  sliderField: { marginTop: 10 },
+  sliderLabelRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
+  sliderValue: { color: '#e7edf3', fontVariant: ['tabular-nums'], fontSize: 13 },
+  handSlider: { width: '100%', height: 44 },
   sideSwitch: { flexDirection: 'row', gap: 8 },
   sideButton: { flex: 1, backgroundColor: '#1a2e3f', paddingVertical: 11, alignItems: 'center', borderRadius: 8 },
   sideButtonActive: { backgroundColor: '#295d8a' },

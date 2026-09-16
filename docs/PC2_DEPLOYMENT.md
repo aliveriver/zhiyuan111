@@ -2,11 +2,11 @@
 
 适用主机：PC2 `10.0.1.41`，用户 `run`，项目 `/home/run/zhiyuan111`。本方案不升级固件、不修改 PC1 的 MC/HAL/状态机配置，也不部署独立 OmniHand 驱动。
 
-当前功能及限制见 [App 手册](APP_USER_GUIDE.md)，接口证据见 [调查报告](X2_V0_9_7_CONTROL_INVESTIGATION.md)。部署本版本不会解锁真机手部执行和轨迹播放；能使用的是现有人工移动、状态采样、轨迹与位置预设管理。启动 X2 后端会注册 MC 输入源，不是纯只读诊断。
+当前功能及限制见 [App 手册](APP_USER_GUIDE.md)，接口证据见 [调查报告](X2_V0_9_7_CONTROL_INVESTIGATION.md)。部署本版本恢复真机手部五参数和位置预设执行；支持现有人工移动、状态采样与轨迹管理，独立 MC 回放已接入但默认关闭，需完整现场验收配置。启动 X2 后端会注册 MC 输入源，不是纯只读诊断。
 
-## 1. 停止旧桥接并备份
+## 1. 备份及运行进程边界
 
-在机器人静止、现场人员值守物理急停的条件下，先退出 App TELEOP，再在旧桥接终端按 Ctrl+C。不要停止厂商 MC/HAL 服务。
+当前现场未准备好时，只备份、同步代码和做离线验证，**不自动停止或重启现有桥接，不启动 X2 后端，不发送运动命令**。文件同步不会使运行中的旧 Python 进程自动升级。现场准备好后，在机器人静止、物理急停有人值守时先退出 App TELEOP，再由操作员在旧终端 Ctrl+C。不要停止厂商 MC/HAL 服务。
 
 PC2 上检查是否仍有旧桥接占用端口：
 
@@ -80,7 +80,7 @@ uv sync --python /usr/bin/python3.10
 ```bash
 cd /home/run/zhiyuan111
 PYTHONPATH="$PWD/src" .venv/bin/python -m x2_ps5_teleop.bridge.server \
-    --robot mock --host 0.0.0.0 --port 8765 \
+    --robot mock --host 0.0.0.0 --port 18765 \
     --data-dir /tmp/x2-award-mock-data \
     --config /home/run/zhiyuan111/config/controller.json
 ```
@@ -108,7 +108,7 @@ export LD_PRELOAD="/agibot/software/common/lib/libaimdk_msgs__rosidl_generator_p
 
 `common` 的完整 `aimdk_msgs` 必须优先，不能被 `ec` 的同名精简包遮蔽。保留前台终端观察日志。首次部署不配置开机自动启动或无人值守自动重启。
 
-启动成功应看到 WebSocket 监听日志及正确的源码路径。App 连接后应显示：当前固件独立手部控制和上肢动画停止链路未确认，真机执行未开放。这是预期行为。
+启动成功应看到 WebSocket 监听日志及正确的源码路径。App 连接后应显示：已恢复灵巧手参数与位置控制，机械臂控制权及动画停止链路尚未确认。手部按钮解锁后可用，上肢回放不可用。
 
 ## 6. 启动手机 App
 
@@ -123,7 +123,9 @@ npm start
 
 用项目所需 Expo/React Native 版本兼容的客户端打开 Metro 给出的入口。桥接地址填 `ws://10.0.1.41:8765`。手机既需要访问 Expo 开发电脑，也需要访问 PC2；不能将 Metro 地址当作机器人 WebSocket 地址。
 
-若使用自行构建的安装包，更新包后也要核对能力说明和状态录制按钮文字，避免旧 App 默认发 `teach_mode:true`。
+本轮滑条使用 Expo SDK 匹配的 `@react-native-community/slider`，需同步 `package.json` 和 `package-lock.json` 后在 App 开发电脑运行 `npm ci`。自建开发客户端/安装包需要重新构建以包含原生模块，单独热更新 JS 不一定足够；使用匹配的 Expo Go 时沿用其内置模块。PC2 若仅运行 Python 桥接则无需安装 npm 依赖。
+
+若使用自行构建的安装包，更新包后也要核对能力说明和状态录制按钮文字，避免旧 App 默认发 `teach_mode:true`。MC 动画测试另见 [验收说明](MC_ANIMATION_COMMISSIONING.md)。
 
 ## 7. 部署验收
 
@@ -131,10 +133,10 @@ npm start
 2. 连接 X2，确认后端说明不是 Mock。
 3. 先读取当前双手位置；没有反馈时不要点击任何状态迁移或电机上下电操作。
 4. 在现场受控条件下，20 Hz 录制短时静止状态，停止保存，检查臂 14 / 左手 10 / 右手 10。此步骤只验证采集，不证明动作回放。
-5. 确认真机手部发送和轨迹播放按钮不可用，旧版手部消息也会被服务端拒绝。
+5. 确认手部参数按钮在 TELEOP 且无播放活动时可用。由现场人员使用已验证参数进行所选手的空载小幅测试，检查另一只手不变；读取反馈，保存位置预设，再验证原始符号回放。轨迹播放按钮仍不可用。
 6. 核对退出 TELEOP、断连及心跳超时后的日志和零速请求。软件零速不等于物理急停，不能据此宣称机械臂安全停止已验收。
 
-完整颁奖验收仍需厂商确认 v0.9.7 的手部仲裁和可停止的上肢动画协议，之后再进行单关节空载 20 Hz、3–5 秒、停止验证和 0.25x 全轨迹测试。当前不要执行 `aima em stop-app mc`、`MigrateSystemState`、`SetDcuMotorPowerState` 或直接向 HAL 发布来绕过限制。
+完整颁奖验收按 [MC 验收说明](MC_ANIMATION_COMMISSIONING.md) 分阶段进行：单关节空载 ≤0.02 rad / 3 秒、中途停止、暂停继续与断连，再做 0.25x 全轨迹测试。当前不要执行 `aima em stop-app mc`、`MigrateSystemState`、`SetDcuMotorPowerState` 或直接向 HAL 手臂话题发布来绕过限制。
 
 ## 8. 数据、日志与回滚
 
@@ -143,7 +145,7 @@ npm start
 - 代码：`/home/run/zhiyuan111`
 - 日志：前台 stdout/stderr；按需由终端保存，日志不包含登录口令。
 
-回滚时先退出 App、在桥接终端 Ctrl+C，再将备份代码解压到单独目录检查。确认后恢复代码；保留当前数据目录，不把旧备份直接覆盖新录制。旧代码可能没有本次增加的 HAL 手命令拦截，回滚后不要用旧手部按钮规避保护。
+回滚时先退出 App、在桥接终端 Ctrl+C，再将备份代码解压到单独目录检查。确认后恢复代码；保留当前数据目录，不把旧备份直接覆盖新录制。回滚后确认 App 与桥接协议兼容；本版已恢复旧手部参数通道，不需要回滚来使用它。
 
 故障定位：
 
@@ -155,3 +157,18 @@ npm start
 | 录制缺少状态 | 只读检查 arm/state 与 hand/state，不发布测试命令 |
 | 预设文件损坏导致启动失败 | 备份原文件、人工检查 JSON；不删除文件来绕过错误 |
 | `Develop_MC` 报错 | 旧 App 正在请求卸力示教，更新 App 并使用状态录制；不要迁移系统状态 |
+
+
+## 9. 验收后启用 MC 回放
+
+新参数 `--mc-commissioning-profile <JSON路径>` 仅用于**已完成现场验收**的报告。模板及字段见 [验收说明](MC_ANIMATION_COMMISSIONING.md)，不要将模板 false 批量改成 true；初步验收使用专门 trial，不提前开放正常 App。
+
+准备好的报告放在 `/home/run/.x2_ps5_teleop/mc-commissioning.json`，报告正文可与其同目录。PC2→soc0 需要已核对的主机密钥及可用 SSH 密钥认证，BatchMode 上传不交互询问密码。每次开始/继续会重新核对 soc0 库与配置哈希、Business / STAND_DEFAULT / RUNNING / IDLE、反馈新鲜度与起点；不匹配即拒绝。
+
+在第 5 节环境已设置且旧桥接已由现场操作员退出之后，给原 X2 启动命令增加：
+
+```text
+--mc-commissioning-profile /home/run/.x2_ps5_teleop/mc-commissioning.json
+```
+
+不提供参数时真机回放仍关闭，现有轨迹管理和手部控制保持可用。该配置不改动轨迹数据，不升级固件，不取消 `_require_develop_mc()`。App 会显示报告限定的最高速度和估算进度。遇到 stop_failed 时持续互锁；停止未确认文件不能手工删除绕过。当前同步不部署通过的验收报告、不自动重启桥接。

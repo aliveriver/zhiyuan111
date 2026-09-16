@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 from ..core import HandAction, Mode
+from ..robot.mc_playback import MCPlayback
 from ..robot.motion import RobotInterface
 from ..teleop.state_machine import TeleopState
 from .hand_poses import HandPoseStore, validate_positions
@@ -92,12 +93,14 @@ class BridgeController:
         velocity_limits: tuple[float, float, float] = (0.12, 0.08, 0.15),
         trajectory_path: str | Path | None = None,
         hand_pose_path: str | Path | None = None,
+        mc_playback: MCPlayback | None = None,
     ):
         if timeout <= 0:
             raise ValueError("timeout 必须大于 0")
         if any(limit < 0 for limit in velocity_limits):
             raise ValueError("速度上限不能为负数")
         self.robot = robot
+        self.mc_playback = mc_playback
         self.source = source
         self.timeout = timeout
         self.velocity_limits = velocity_limits
@@ -264,7 +267,11 @@ class BridgeController:
             self.owner_session = None
             self.owner_client = None
             self.armed = False
-        self.robot.close()
+        try:
+            if self.mc_playback:
+                await self.mc_playback.close()  # Outside the asyncio control lock.
+        finally:
+            self.robot.close()
 
     def _sequence(self, message: dict[str, Any]) -> int:
         sequence = message.get("sequence")
@@ -280,6 +287,8 @@ class BridgeController:
         if not isinstance(enabled, bool):
             raise BridgeError("invalid_arm", "arm.enabled 必须是布尔值")
         if enabled:
+            if self._playback_busy():
+                raise BridgeError("activity_busy", "MC 活动尚未确认结束，不能重新进入 TELEOP")
             if self.state == TeleopState.ESTOP:
                 raise BridgeError("estop_latched", "急停已锁存，请先明确清除急停")
             self.state = TeleopState.TELEOP
@@ -297,7 +306,7 @@ class BridgeController:
             raise BridgeError("not_armed", "请先进入 TELEOP")
         values = tuple(self._finite_number(message.get(key), key) for key in ("forward", "lateral", "angular"))
         clamped = tuple(max(-limit, min(limit, value)) for value, limit in zip(values, self.velocity_limits))
-        if self.recording_name is not None or self.playback_state in ("playing", "paused"):
+        if self.recording_name is not None or self._playback_busy():
             clamped = (0.0, 0.0, 0.0)
         self.robot.move(*clamped)
         self._record_frame_locked({"type": "velocity", "forward": clamped[0], "lateral": clamped[1], "angular": clamped[2]}, now)
@@ -306,7 +315,7 @@ class BridgeController:
     def _mode_locked(self, mode_value: Any, now: float) -> None:
         if not self.armed or self.state != TeleopState.TELEOP:
             raise BridgeError("not_armed", "请先进入 TELEOP")
-        if self.recording_name is not None or self.playback_state in ("playing", "paused"):
+        if self.recording_name is not None or self._playback_busy():
             raise BridgeError("activity_busy", "录制或播放期间不能切换运动模式")
         try:
             mode = Mode(str(mode_value))
@@ -386,6 +395,7 @@ class BridgeController:
             clean.append((index, *values))
         self._stop_locked()
         self.robot.hand_target(str(side), clean)
+        self.last_hand_command = f"{side}: 旧版参数目标（已发送，非抓稳确认）"
         LOGGER.info("执行手部参数 side=%s joints=%d", side, len(clean))
         self._record_frame_locked({"type": "hand_target", "side": str(side), "joints": joints}, now)
         self.state = TeleopState.TELEOP
@@ -395,7 +405,13 @@ class BridgeController:
     def control_capabilities(self) -> dict[str, Any]:
         getter = getattr(self.robot, "control_capabilities", None)
         if getter is not None:
-            return getter()
+            capabilities = dict(getter())
+            if self.mc_playback:
+                capabilities.update(upper_body_playback=True, playback_backend="mc_animation",
+                                    playback_progress_estimated=True,
+                                    max_playback_speed=self.mc_playback.profile['max_speed'],
+                                    reason="MC 回放已配置现场验收报告；每次播放仍校验站立、版本与起点，进度为估算")
+            return capabilities
         return {"backend": "custom", "hand_position": False,
                 "upper_body_playback": False, "teaching": False,
                 "reason": "自定义后端未声明执行能力"}
@@ -409,8 +425,11 @@ class BridgeController:
         if not capabilities.get(key):
             raise BridgeError("control_unavailable", capabilities["reason"])
 
+    def _playback_busy(self) -> bool:
+        return self.mc_playback.busy if self.mc_playback else self.playback_state in ("playing", "paused")
+
     def _require_hand_idle(self) -> None:
-        if self.playback_state in ("playing", "paused"):
+        if self._playback_busy():
             raise BridgeError("activity_busy", "请先停止轨迹播放，再发送手部目标")
 
     def _hand_pose_locked(self, message: dict[str, Any], now: float) -> dict[str, Any]:
@@ -488,7 +507,7 @@ class BridgeController:
             raise BridgeError("invalid_trajectory", "轨迹名称不能为空且不能超过 80 个字符")
         if self.recording_name is not None:
             raise BridgeError("already_recording", f"正在录制 {self.recording_name}")
-        if self.playback_state in ("playing", "paused"):
+        if self._playback_busy():
             raise BridgeError("activity_busy", "请先停止当前轨迹播放")
         if name in self.trajectories:
             raise BridgeError("trajectory_exists", "轨迹名称已存在，请换一个名称或先删除旧轨迹")
@@ -574,7 +593,7 @@ class BridgeController:
         name = str(message.get("name", "")).strip()
         if name not in self.trajectories:
             raise BridgeError("trajectory_not_found", "轨迹不存在")
-        if self.playback_state in ("playing", "paused") and self.playback_name == name:
+        if self._playback_busy() and self.playback_name == name:
             raise BridgeError("activity_busy", "请先停止当前轨迹播放")
         del self.trajectories[name]
         self._persist_trajectories_locked()
@@ -584,7 +603,7 @@ class BridgeController:
         new = str(message.get("new_name", "")).strip()
         if old not in self.trajectories:
             raise BridgeError("trajectory_not_found", "轨迹不存在")
-        if self.playback_state in ("playing", "paused") and self.playback_name == old:
+        if self._playback_busy() and self.playback_name == old:
             raise BridgeError("activity_busy", "请先停止当前轨迹播放")
         if not new or len(new) > 80 or (new != old and new in self.trajectories):
             raise BridgeError("invalid_trajectory", "新名称无效或已存在")
@@ -593,6 +612,12 @@ class BridgeController:
 
     async def _trajectory_command_locked(self, message: dict[str, Any], now: float) -> None:
         command = str(message.get("command", "start"))
+        if command not in ("start", "pause", "resume", "stop"):
+            raise BridgeError("invalid_trajectory", "未知播放命令")
+        if self.mc_playback and command == "stop":
+            self.mc_playback.stop()
+            self._stop_locked()
+            return
         if command == "stop":
             if self.playback_task:
                 self.playback_task.cancel()
@@ -604,6 +629,13 @@ class BridgeController:
             return
         if not self.armed or self.state != TeleopState.TELEOP:
             raise BridgeError("not_armed", "请先进入 TELEOP")
+        if self.mc_playback and command in ("pause", "resume"):
+            try:
+                getattr(self.mc_playback, command)()
+            except ValueError as exc:
+                raise BridgeError("invalid_playback_state", str(exc)) from exc
+            self.last_command_at = now
+            return
         if command == "pause":
             if self.playback_state != "playing":
                 raise BridgeError("not_playing", "当前没有正在播放的轨迹")
@@ -618,7 +650,7 @@ class BridgeController:
             return
         if self.recording_name is not None:
             raise BridgeError("activity_busy", "请先停止并保存当前录制")
-        if self.playback_state in ("playing", "paused"):
+        if self._playback_busy():
             raise BridgeError("activity_busy", "已有轨迹正在播放，请先停止")
         name = str(message.get("name", "")).strip()
         frames = self.trajectories.get(name)
@@ -640,6 +672,15 @@ class BridgeController:
             if timestamp < 0 or timestamp < previous or not self._complete_upper_state(frame):
                 raise BridgeError("invalid_trajectory", "轨迹需包含顺序时间戳、14 个臂关节及左右手各 10 个有限位置")
             previous = timestamp
+        if self.mc_playback:
+            try:
+                self._stop_locked()
+                self.mc_playback.start(upper_frames, speed)
+            except ValueError as exc:
+                raise BridgeError("invalid_trajectory", str(exc)) from exc
+            self.playback_name = name
+            self.last_command_at = now
+            return
         self.playback_paused = False
         prepare = getattr(self.robot, "prepare_upper_body_playback", None)
         if prepare is not None:
@@ -815,6 +856,8 @@ class BridgeController:
         self.robot.stop()
 
     def _cancel_activity_locked(self) -> None:
+        if self.mc_playback:
+            self.mc_playback.stop()  # Intent only; never cancel a thread or an in-flight RPC.
         if self.recording_task:
             self.recording_task.cancel()
             self.recording_task = None
@@ -831,12 +874,17 @@ class BridgeController:
             self.playback_task.cancel()
             self.playback_task = None
         self.playback_paused = False
-        if self.playback_state in ("playing", "paused"):
+        if not self.mc_playback and self._playback_busy():
             self.playback_state = "idle"
             self.playback_name = None
 
     def _snapshot_locked(self, now: float | None = None) -> BridgeSnapshot:
         now = time.monotonic() if now is None else now
+        if self.mc_playback:
+            self.playback_state = self.mc_playback.state
+            self.playback_progress_ms = int(self.mc_playback.progress_ms)
+            self.playback_duration_ms = int(self.mc_playback.duration_ms)
+            self.playback_error = self.mc_playback.error
         age = None if self.last_command_at is None else max(0, int((now - self.last_command_at) * 1000))
         return BridgeSnapshot(
             self.state,

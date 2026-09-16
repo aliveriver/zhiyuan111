@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import copy
+import math
 import time
 import sys
 from typing import Any, TextIO
@@ -125,11 +126,11 @@ class X2RosRobot(RobotInterface):
     """发布官方文档中确认的 AimDK 消息/服务类型。"""
 
     def control_capabilities(self) -> dict[str, Any]:
-        # No operator override: the v0.9.7 integration has no confirmed
-        # independent hand ownership or interruptible arm animation backend.
-        return {"backend": "x2", "hand_position": False, "upper_body_playback": False,
+        # Restore the hand path previously exercised on this robot. Arm
+        # ownership and interruptible animation remain separate capabilities.
+        return {"backend": "x2", "hand_position": True, "upper_body_playback": False,
                 "teaching": False,
-                "reason": "当前固件的独立手部控制与上肢动画停止链路尚未确认；可录制状态和编辑预设，真机执行未开放"}
+                "reason": "已恢复灵巧手参数与位置控制；机械臂控制权及动画停止链路尚未确认，真机上肢回放和卸力示教未开放"}
 
     def _require_control(self, capability: str) -> None:
         capabilities = self.control_capabilities()
@@ -138,7 +139,18 @@ class X2RosRobot(RobotInterface):
 
     def hand_positions(self, side: str, positions: list[float]) -> None:
         self._require_control("hand_position")
-        raise RuntimeError("尚未安装经过验证的灵巧手执行后端")
+        if side not in ("left", "right"):
+            raise ValueError("side 必须是 left 或 right")
+        if len(positions) != HAND_SLOT_COUNT or any(
+            not math.isfinite(p) or abs(p) > math.pi for p in positions
+        ):
+            raise ValueError("需要 10 个 −π～π rad 的有限位置值")
+        # Raw feedback already contains the left thumb sign. Cancel the
+        # legacy editor transform before using the shared message builder.
+        self.hand_target(side, [
+            (i, -p if side == "left" and i < 3 else p, 0.1, 0.0, 0.0, 0.0)
+            for i, p in enumerate(positions)
+        ])
 
     def __init__(
         self,

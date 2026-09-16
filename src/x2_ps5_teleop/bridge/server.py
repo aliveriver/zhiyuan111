@@ -14,6 +14,7 @@ from websockets.exceptions import ConnectionClosed
 
 from .controller import BridgeController, BridgeError
 from ..robot.motion import MockRobot, X2RosRobot
+from ..robot.mc_playback import MCPlayback, load_profile
 from ..settings import DEFAULT_CONFIG_PATH, load_settings
 
 PROTOCOL_VERSION = 1
@@ -46,7 +47,7 @@ class TeleopBridgeServer:
             await self._send(session_id, {
                 "type": "hello_ack",
                 "protocol_version": PROTOCOL_VERSION,
-                "capabilities": ["velocity", "mode", "trajectory", "hand_pose_library", "state_recording"],
+                "capabilities": ["velocity", "mode", "trajectory", "hand_target", "hand_positions", "hand_pose_library", "state_recording"],
                 "control_capabilities": self.controller.control_capabilities(),
             })
             await self._broadcast()
@@ -126,6 +127,13 @@ async def serve(args) -> None:
     except ImportError as exc:  # pragma: no cover - 安装依赖后由入口执行
         raise RuntimeError("桥接服务需要 websockets 依赖，请先运行 uv sync") from exc
 
+    profile_path = getattr(args, "mc_commissioning_profile", None)
+    interlock_path = args.data_dir / "mc-motion-unconfirmed.lock"
+    if args.robot == "mock" and profile_path:
+        raise ValueError("Mock 不加载实机 MC 验收配置")
+    profile = load_profile(profile_path) if profile_path else None
+    if args.robot == "x2" and interlock_path.exists() and profile is None:
+        raise RuntimeError("上次 MC 停止未确认；需原验收配置和现场停止处理，禁止删除互锁文件绕过")
     settings = load_settings(args.config)
     LOGGER.info("桥接启动 protocol=%s python=%s module=%s", PROTOCOL_VERSION, sys.executable, __file__)
     if args.robot == "mock":
@@ -143,6 +151,7 @@ async def serve(args) -> None:
         ),
         trajectory_path=args.data_dir / "trajectories.json",
         hand_pose_path=args.data_dir / "hand_poses.json",
+        mc_playback=MCPlayback(profile, interlock_path=interlock_path) if profile else None,
     )
     server = TeleopBridgeServer(controller)
     watchdog = asyncio.create_task(server.watchdog_loop())
@@ -170,6 +179,8 @@ def main() -> None:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--data-dir", type=Path, default=Path.home() / ".x2_ps5_teleop",
                         help="轨迹和手部预设目录；Mock 联调应使用独立目录")
+    parser.add_argument("--mc-commissioning-profile", type=Path,
+                        help="已审阅的 MC 现场验收 JSON；省略则禁止真机上肢回放")
     args = parser.parse_args()
     asyncio.run(serve(args))
 

@@ -1,0 +1,41 @@
+{
+  "firmware": "Agi v0.9.7",
+  "reviewed_by": "",
+  "report_file": "field-report.md",
+  "report_sha256": "",
+  "ssh_host": "run@10.0.1.40",
+  "remote_sha256": {
+    "/agibot/software/mc/lib/libmc_module_main_service.so": "a708839613a7bd4da70683e3ade185d5c5baec7bd5eeb29b58b3d5ca66d093a4",
+    "/agibot/software/mc/lib/libmc_runner_animation_player.so.0.0.0": "cb71131a23039d20af2e346e004064a3a780aed7cd3000dfbec8705643e6b477",
+    "/agibot/software/mc_param/robot/lx2501_3_t2d5/mc.yaml": "",
+    "/agibot/software/mc_param/robot/lx2501_3_t2d5/action_setting.yaml": "",
+    "/agibot/software/mc_param/robot/lx2501_3_t2d5/classic/animation_player.yaml": ""
+  },
+  "checks": {
+    "single_joint": false,
+    "hold_stop": false,
+    "pause_resume": false,
+    "repeat_playback": false,
+    "disconnect_stop": false,
+    "legs_waist_unchanged": false,
+    "status_sequence": false,
+    "full_clip_025x": false
+  },
+  "player_enum_values": {
+    "IDLE": 0,
+    "PRE_PLAYING": 1,
+    "PLAYING": 2,
+    "INTERRUPTING": 3,
+    "ERROR": 4
+  },
+  "play_sequence": [],
+  "hold_sequence": [],
+  "start_tolerance_rad": 0.01,
+  "hold_tolerance_rad": 0.01,
+  "stable_tolerance_rad": 0.002,
+  "hold_snapshot_max_age_s": 0.2,
+  "max_speed": 0.25,
+  "max_joint_speed_rad_s": 0.1,
+  "transition_timeout_s": 5,
+  "max_clip_seconds": 60
+}
