@@ -46,7 +46,8 @@ class TeleopBridgeServer:
             await self._send(session_id, {
                 "type": "hello_ack",
                 "protocol_version": PROTOCOL_VERSION,
-                "capabilities": ["velocity", "mode", "preset", "hand_target", "hand_params", "hand_command", "trajectory", "upper_body_trajectory", "trajectory_pause", "trajectory_stop"],
+                "capabilities": ["velocity", "mode", "trajectory", "hand_pose_library", "state_recording"],
+                "control_capabilities": self.controller.control_capabilities(),
             })
             await self._broadcast()
             async for raw in websocket:
@@ -76,9 +77,12 @@ class TeleopBridgeServer:
                 await self._broadcast()
 
     async def watchdog_loop(self) -> None:
+        tick = 0
         while True:
             await asyncio.sleep(0.05)
-            if await self.controller.watchdog():
+            changed = await self.controller.watchdog()
+            tick += 1
+            if changed or tick % 4 == 0:
                 await self._broadcast()
 
     async def _broadcast(self) -> None:
@@ -137,7 +141,8 @@ async def serve(args) -> None:
             settings.mapping.max_linear_y,
             settings.mapping.max_angular_z,
         ),
-        trajectory_path=Path.home() / ".x2_ps5_teleop" / "trajectories.json",
+        trajectory_path=args.data_dir / "trajectories.json",
+        hand_pose_path=args.data_dir / "hand_poses.json",
     )
     server = TeleopBridgeServer(controller)
     watchdog = asyncio.create_task(server.watchdog_loop())
@@ -163,6 +168,8 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=0.4)
     parser.add_argument("--source", default="mobile_app")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
+    parser.add_argument("--data-dir", type=Path, default=Path.home() / ".x2_ps5_teleop",
+                        help="轨迹和手部预设目录；Mock 联调应使用独立目录")
     args = parser.parse_args()
     asyncio.run(serve(args))
 

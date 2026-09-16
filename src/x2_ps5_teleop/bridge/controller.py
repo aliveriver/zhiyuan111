@@ -8,7 +8,7 @@ WebSocket 本身是并发的，但机器人命令不能并发执行。这里把�
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import logging
 import math
@@ -19,6 +19,7 @@ from typing import Any
 from ..core import HandAction, Mode
 from ..robot.motion import RobotInterface
 from ..teleop.state_machine import TeleopState
+from .hand_poses import HandPoseStore, validate_positions
 
 
 LOGGER = logging.getLogger(__name__)
@@ -48,6 +49,9 @@ class BridgeSnapshot:
     playback_progress_ms: int = 0
     playback_duration_ms: int = 0
     playback_error: str | None = None
+    control_capabilities: dict[str, Any] = field(default_factory=dict)
+    recording_error: str | None = None
+    last_hand_command: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +69,9 @@ class BridgeSnapshot:
             "playback_progress_ms": self.playback_progress_ms,
             "playback_duration_ms": self.playback_duration_ms,
             "playback_error": self.playback_error,
+            "control_capabilities": self.control_capabilities,
+            "recording_error": self.recording_error,
+            "last_hand_command": self.last_hand_command,
         }
 
 
@@ -84,6 +91,7 @@ class BridgeController:
         timeout: float = 0.4,
         velocity_limits: tuple[float, float, float] = (0.12, 0.08, 0.15),
         trajectory_path: str | Path | None = None,
+        hand_pose_path: str | Path | None = None,
     ):
         if timeout <= 0:
             raise ValueError("timeout 必须大于 0")
@@ -106,6 +114,9 @@ class BridgeController:
         # development without ROS remain usable.
         self.trajectory_path = Path(trajectory_path) if trajectory_path else None
         self.trajectories: dict[str, list[dict[str, Any]]] = self._load_trajectories()
+        self.hand_poses = HandPoseStore(hand_pose_path)
+        self.last_hand_command: str | None = None
+        self.recording_error: str | None = None
         self.recording_name: str | None = None
         self.recording_frames: list[dict[str, Any]] = []
         self.recording_started_at: float | None = None
@@ -187,6 +198,11 @@ class BridgeController:
                 self._preset_locked(message.get("action"), now)
             elif message_type == "hand_target":
                 self._hand_target_locked(message, now)
+            elif message_type in ("hand_pose_list", "hand_pose_save", "hand_pose_delete",
+                                  "hand_pose_rename", "hand_pose_apply", "hand_positions", "hand_state"):
+                extra = self._hand_pose_locked(message, now)
+                return {**self._snapshot_locked(now).as_dict(),
+                        "hand_poses": self.hand_poses.list(), **extra}
             elif message_type in ("hand_params", "hand_command"):
                 LOGGER.warning("收到兼容手部消息类型 %s，按 hand_target 处理", message_type)
                 # Accept the field names used by early mobile builds while
@@ -231,12 +247,11 @@ class BridgeController:
                 self.owner_session is None
                 or not self.armed
                 or self.state != TeleopState.TELEOP
-                or self.playback_state in ("playing", "paused")
-                or self.recording_name is not None
                 or self.last_command_at is None
                 or now - self.last_command_at <= self.timeout
             ):
                 return False
+            self._cancel_activity_locked()
             self._stop_locked()
             self.state = TeleopState.TIMEOUT
             self.armed = False
@@ -291,6 +306,8 @@ class BridgeController:
     def _mode_locked(self, mode_value: Any, now: float) -> None:
         if not self.armed or self.state != TeleopState.TELEOP:
             raise BridgeError("not_armed", "请先进入 TELEOP")
+        if self.recording_name is not None or self.playback_state in ("playing", "paused"):
+            raise BridgeError("activity_busy", "录制或播放期间不能切换运动模式")
         try:
             mode = Mode(str(mode_value))
         except ValueError as exc:
@@ -302,6 +319,8 @@ class BridgeController:
     def _preset_locked(self, action_value: Any, now: float) -> None:
         if not self.armed or self.state != TeleopState.TELEOP:
             raise BridgeError("not_armed", "请先进入 TELEOP")
+        self._require_capability("hand_position")
+        self._require_hand_idle()
         action_by_name = {
             "rt_preset": HandAction.RT,
             "lt_preset": HandAction.LT,
@@ -338,6 +357,8 @@ class BridgeController:
     def _hand_target_locked(self, message: dict[str, Any], now: float) -> None:
         if not self.armed or self.state != TeleopState.TELEOP:
             raise BridgeError("not_armed", "请先进入 TELEOP")
+        self._require_capability("hand_position")
+        self._require_hand_idle()
         side = message.get("side")
         joints = message.get("joints")
         if side not in ("left", "right") or not isinstance(joints, list) or len(joints) != 10:
@@ -371,6 +392,79 @@ class BridgeController:
         self.armed = True
         self.last_command_at = now
 
+    def control_capabilities(self) -> dict[str, Any]:
+        getter = getattr(self.robot, "control_capabilities", None)
+        if getter is not None:
+            return getter()
+        return {"backend": "custom", "hand_position": False,
+                "upper_body_playback": False, "teaching": False,
+                "reason": "自定义后端未声明执行能力"}
+
+    def _require_capability(self, key: str) -> None:
+        # Legacy third-party backends retain their old protocol path. New
+        # position-only commands require an explicit backend implementation.
+        if not hasattr(self.robot, "control_capabilities"):
+            return
+        capabilities = self.control_capabilities()
+        if not capabilities.get(key):
+            raise BridgeError("control_unavailable", capabilities["reason"])
+
+    def _require_hand_idle(self) -> None:
+        if self.playback_state in ("playing", "paused"):
+            raise BridgeError("activity_busy", "请先停止轨迹播放，再发送手部目标")
+
+    def _hand_pose_locked(self, message: dict[str, Any], now: float) -> dict[str, Any]:
+        kind = message["type"]
+        try:
+            if kind == "hand_pose_list":
+                return {}
+            if kind == "hand_pose_save":
+                self.hand_poses.save(message)
+                return {}
+            if kind == "hand_pose_delete":
+                self.hand_poses.delete(str(message.get("name", "")))
+                return {}
+            if kind == "hand_pose_rename":
+                self.hand_poses.rename(str(message.get("name", "")), message.get("new_name"))
+                return {}
+            if kind == "hand_state":
+                state = self.robot.upper_body_state()
+                if not self._complete_upper_state(state):
+                    raise BridgeError("state_unavailable", "尚未收到完整、新鲜的上肢和双手反馈")
+                return {"hand_feedback": {side: [j["position"] for j in state[f"{side}_hand"]]
+                                          for side in ("left", "right")}}
+            if not self.armed or self.state != TeleopState.TELEOP:
+                raise BridgeError("not_armed", "请先进入 TELEOP")
+            self._require_hand_idle()
+            self._require_capability("hand_position")
+            if kind == "hand_pose_apply":
+                pose = self.hand_poses.poses.get(str(message.get("name", "")))
+                if pose is None:
+                    raise ValueError("手部预设不存在")
+                if pose["requires_confirmation"] and message.get("confirmed") is not True:
+                    raise BridgeError("confirmation_required", "请确认选手已接稳，再执行松手预设")
+            else:
+                pose = message
+            side = pose.get("side")
+            if side not in ("left", "right"):
+                raise ValueError("请选择左手或右手")
+            positions = validate_positions(pose.get("positions"))
+            setter = getattr(self.robot, "hand_positions", None)
+            if setter is None:
+                raise BridgeError("control_unavailable", "后端没有手部位置控制实现")
+            self._stop_locked()
+            try:
+                setter(side, positions)
+            except Exception as exc:
+                raise BridgeError("hand_control_failed", str(exc)) from exc
+            self.last_hand_command = f"{side}: {pose.get('name', '位置目标')}（已发送，非抓稳确认）"
+            self.last_command_at = now
+            return {}
+        except BridgeError:
+            raise
+        except (ValueError, TypeError, OSError) as exc:
+            raise BridgeError("invalid_hand_pose", str(exc)) from exc
+
     def _trajectory_list_locked(self) -> list[dict[str, Any]]:
         result = []
         for name, frames in sorted(self.trajectories.items()):
@@ -401,12 +495,16 @@ class BridgeController:
         rate = self._finite_number(message.get("sample_rate_hz", 20.0), "sample_rate_hz")
         if rate < 1.0 or rate > 100.0:
             raise BridgeError("invalid_trajectory", "采样频率必须在 1 到 100 Hz 之间")
+        teach_mode = message.get("teach_mode", False)
+        if not isinstance(teach_mode, bool):
+            raise BridgeError("invalid_trajectory", "teach_mode 必须是布尔值")
         self.recording_name = name
         self.recording_frames = []
         self.recording_started_at = now
         self.recording_monotonic_started_at = time.monotonic()
         self.recording_sample_rate_hz = rate
-        self.recording_teach_mode = bool(message.get("teach_mode", True))
+        self.recording_teach_mode = teach_mode
+        self.recording_error = None
         self._stop_locked()
         if self.recording_teach_mode:
             prepare_teaching = getattr(self.robot, "prepare_upper_body_teaching", None)
@@ -533,8 +631,15 @@ class BridgeController:
             await self._play_legacy_trajectory_locked(frames, speed=self._finite_number(message.get("speed", 1.0), "speed"), now=now)
             return
         speed = self._finite_number(message.get("speed", 1.0), "speed")
-        if speed <= 0 or speed > 4:
+        if speed < 0.01 or speed > 4:
             raise BridgeError("invalid_trajectory", "播放速度必须在 0.01 到 4 倍之间")
+        self._require_capability("upper_body_playback")
+        previous = -1.0
+        for frame in upper_frames:
+            timestamp = self._finite_number(frame.get("t_ms"), "t_ms")
+            if timestamp < 0 or timestamp < previous or not self._complete_upper_state(frame):
+                raise BridgeError("invalid_trajectory", "轨迹需包含顺序时间戳、14 个臂关节及左右手各 10 个有限位置")
+            previous = timestamp
         self.playback_paused = False
         prepare = getattr(self.robot, "prepare_upper_body_playback", None)
         if prepare is not None:
@@ -549,25 +654,29 @@ class BridgeController:
         self.playback_duration_ms = int(max((frame.get("t_ms", 0) for frame in upper_frames), default=0))
         self.playback_error = None
         self.playback_task = asyncio.create_task(self._trajectory_play_locked(upper_frames, speed))
-        # Dispatch zero-time frames before acknowledging the request.
-        await asyncio.sleep(0)
+        # The task acquires the same controller lock before each output.
 
     async def _trajectory_play_locked(self, frames: list[dict[str, Any]], speed: float) -> None:
         previous_t = 0.0
         try:
             for frame in frames:
                 target_t = float(frame.get("t_ms", previous_t))
-                remaining = min(10.0, max(0.0, (target_t - previous_t) / 1000.0 / speed))
+                remaining = max(0.0, (target_t - previous_t) / 1000.0 / speed)
                 while remaining > 0:
                     if self.playback_paused:
                         await asyncio.sleep(0.05)
                         continue
                     tick = min(0.02, remaining)
                     await asyncio.sleep(tick)
-                    remaining -= tick
-                self.robot.upper_body_target(frame)
-                self.playback_progress_ms = int(target_t)
-                self.last_command_at = time.monotonic()
+                    if not self.playback_paused:
+                        remaining -= tick
+                while self.playback_paused:
+                    await asyncio.sleep(0.02)
+                async with self.lock:
+                    if not self.armed or self.state != TeleopState.TELEOP:
+                        return
+                    self.robot.upper_body_target(frame)
+                    self.playback_progress_ms = int(target_t)
                 previous_t = target_t
             self.playback_state = "completed"
         except asyncio.CancelledError:
@@ -577,8 +686,8 @@ class BridgeController:
             self.playback_state = "error"
             self.playback_error = str(exc)
         finally:
-            self.last_command_at = time.monotonic()
-            self.playback_task = None
+            if self.playback_task is asyncio.current_task():
+                self.playback_task = None
 
     async def _play_legacy_trajectory_locked(self, frames: list[dict[str, Any]], speed: float, now: float) -> None:
         """Keep protocol-only custom backends usable; X2 never enters this path."""
@@ -616,10 +725,28 @@ class BridgeController:
         if sampler is None:
             return None
         state = sampler()
-        if state:
-            self.recording_frames.append({"type": "upper_body", "t_ms": t_ms, **state})
+        if self._complete_upper_state(state):
+            self.recording_frames.append({"type": "upper_body", "t_ms": t_ms,
+                                          **{key: state[key] for key in ("arm", "left_hand", "right_hand")}})
             return True
         return False
+
+    @staticmethod
+    def _complete_upper_state(state: Any) -> bool:
+        if not isinstance(state, dict):
+            return False
+        for key, count in (("arm", 14), ("left_hand", 10), ("right_hand", 10)):
+            joints = state.get(key)
+            if not isinstance(joints, list) or len(joints) != count:
+                return False
+            for joint in joints:
+                if not isinstance(joint, dict) or not isinstance(joint.get("name"), str):
+                    return False
+                for field in ("position", "velocity", "effort"):
+                    value = joint.get(field, 0.0) if field != "position" else joint.get(field)
+                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                        return False
+        return True
 
     async def _recording_loop(self) -> None:
         """采样实际状态，而不是把手机发出的目标值当作轨迹。"""
@@ -641,12 +768,16 @@ class BridgeController:
                         continue
                     started = self.recording_monotonic_started_at or time.monotonic()
                     t_ms = max(0, int((current - started) * 1000))
-                    self._append_sample_locked(t_ms)
+                    if not self._append_sample_locked(t_ms):
+                        self.recording_error = "上肢反馈缺失或过期，已跳过该采样；停止后可保存已有帧"
                     next_sample += 1.0 / self.recording_sample_rate_hz
                     if next_sample < current:
                         next_sample = current + 1.0 / self.recording_sample_rate_hz
         except asyncio.CancelledError:
             return
+        except Exception as exc:
+            LOGGER.exception("上肢状态采样失败")
+            self.recording_error = f"采样已中止：{exc}；停止录制可保存已有帧"
 
     def _load_trajectories(self) -> dict[str, list[dict[str, Any]]]:
         if not self.trajectory_path or not self.trajectory_path.exists():
@@ -721,6 +852,9 @@ class BridgeController:
             self.playback_progress_ms,
             self.playback_duration_ms,
             self.playback_error,
+            self.control_capabilities(),
+            self.recording_error,
+            self.last_hand_command,
         )
 
     @staticmethod

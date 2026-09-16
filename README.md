@@ -2,6 +2,10 @@
 
 本仓库包含首版低速演示闭环：
 
+X2 Ultra v0.9.7 的当前操作与部署请以 [App 使用手册](docs/APP_USER_GUIDE.md) 和
+[PC2 部署手册](docs/PC2_DEPLOYMENT.md) 为准。支持不卸力的上肢状态录制与手部位置预设管理；
+真机手部执行和轨迹回放仍被保护拦截，Mock 支持流程验证。不会停止官方 MC 或直接抢占 HAL。
+
 ```text
 DualSense 蓝牙 -> 输入读取器 -> IDLE/TELEOP 状态机 -> Mock 或 AimDK ROS 2
 ```
@@ -60,7 +64,7 @@ uv run x2-ps5-input-test
 ## 手机 Expo App
 
 手机端代码位于 [mobile](mobile)，PC2 桥接服务位于 `src/x2_ps5_teleop/bridge`。
-完整流程见 [手机 App 使用说明](docs/MOBILE_APP_PLAN.md#手机-app-使用流程)。
+完整流程见 [App 使用手册](docs/APP_USER_GUIDE.md)。
 
 ### 本地 Mock 联调
 
@@ -79,32 +83,17 @@ npm start
 
 ### 真机使用前提
 
-真机模式只能在 PC2（通常为 `10.0.1.41`）运行，不能在 PC1（`10.0.1.40`）运行。以官方
-`run` 用户登录 PC2 后，进入项目目录直接执行 `./scripts/start_mobile_bridge.sh` 即可；
-脚本会自动加载 AimDK 环境并选择 `x2` 后端。显式命令如下：
-
-```bash
-cd /agibot/data/home/agi/x2_ps5_teleop
-source /agibot/software/cobridge/setup.bash
-export PYTHONPATH=$PWD/src:/agibot/software/common/local/lib/python3.10/dist-packages:/agibot/software/ec/local/lib/python3.10/dist-packages:$PYTHONPATH
-export AMENT_PREFIX_PATH=/agibot/software/common:/agibot/software/ec:$AMENT_PREFIX_PATH
-export LD_LIBRARY_PATH=/agibot/software/common/lib:/agibot/software/ec/lib:$LD_LIBRARY_PATH
-./scripts/start_mobile_bridge.sh --robot x2 --host 0.0.0.0 --port 8765 --source mobile_app
-```
-
-在 PC2（`10.0.1.41`）以 `run` 用户执行时，脚本会自动选择 `x2` 真机后端；其它主机
-默认选择 Mock。需要显式指定时可追加 `--robot mock` 或 `--robot x2`。
-
-启动后 App 初始为 `IDLE`。确认物理急停已释放、周围无人且机器人状态稳定，再点击
-“进入 TELEOP”。松开摇杆、退出 App、切后台、断开网络或超过 0.4 秒未收到控制帧时，
-桥接服务都会发送零速度。物理急停始终必须有人值守。
+当前 PC2 为 `10.0.1.41`，使用 `run` 用户，项目目录为 `/home/run/zhiyuan111`。
+按 [PC2 部署手册](docs/PC2_DEPLOYMENT.md) 备份数据、验证代码并启动桥接；不要在 PC1 运行二开桥接。
+App 初始为 IDLE；现场确认后进入 TELEOP。状态录制不卸力，不要求 Develop_MC。
+真机手部主动控制和轨迹回放仍未开放，不能通过改状态名或停用 MC 绕过。
 
 ### 手机控制规则
 
 - 同一时间只允许一个手机控制；另一台手机会收到 `busy`。
 - 同一手机重新连接时，新连接会接管旧连接，旧连接的延迟消息不会继续控制机器人。
 - 速度帧由服务端再次限幅，服务端拒绝乱序或重复序列号。
-- 手部预设动作会先停车，执行后回到 `IDLE`，需要再次点击“进入 TELEOP”。
+- 新手部位置预设只在声明支持的后端执行，先请求零速度并保持 TELEOP；当前 X2 执行被拦截。
 - “急停”是锁存状态，必须在确认安全后发送清除急停，再重新进入 TELEOP。
 
 ### 关于官方蓝牙遥控器连接

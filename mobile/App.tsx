@@ -15,6 +15,8 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 
+type ControlCapabilities = { backend: string; hand_position: boolean; upper_body_playback: boolean; teaching: boolean; reason: string };
+type HandPose = { name: string; side: 'left' | 'right'; positions: number[]; requires_confirmation: boolean };
 type Motion = { forward: number; lateral: number; angular: number };
 type BridgeState = {
   state: string;
@@ -30,18 +32,12 @@ type BridgeState = {
   playback_progress_ms: number;
   playback_duration_ms: number;
   playback_error: string | null;
+  control_capabilities?: ControlCapabilities;
+  recording_error?: string | null;
+  last_hand_command?: string | null;
 };
 type JoystickValue = { x: number; y: number };
 type TrajectoryInfo = { name: string; frames: number; duration_ms: number; arm_joints: number; left_hand_joints: number; right_hand_joints: number };
-type HandField = 'position' | 'velocity' | 'acceleration' | 'deceleration' | 'effort';
-const HAND_FIELDS: Array<{ key: HandField; label: string; range: string; hint: string }> = [
-  { key: 'position', label: '位置', range: '−1～1', hint: '关节目标位置' },
-  { key: 'velocity', label: '速度', range: '0～1', hint: '运动速度' },
-  { key: 'acceleration', label: '加速度', range: '0～10', hint: '启动加速度' },
-  { key: 'deceleration', label: '减速度', range: '0～10', hint: '停止减速度' },
-  { key: 'effort', label: '力度', range: '−1～1', hint: '执行力度' },
-];
-
 const DEFAULT_URL = 'ws://10.0.1.41:8765';
 const MODES = [
   ['PASSIVE_DEFAULT', '被动'],
@@ -49,12 +45,6 @@ const MODES = [
   ['JOINT_DEFAULT', '关节'],
   ['STAND_DEFAULT', '站立'],
   ['LOCOMOTION_DEFAULT', '行走'],
-] as const;
-const PRESETS = [
-  ['grip', '握紧'],
-  ['open', '张开'],
-  ['victory', '比个耶'],
-  ['thumbs_up', '点个赞'],
 ] as const;
 const AWARD_PRESETS = [
   ['单手抓取', '单手抓取奖状'],
@@ -160,10 +150,14 @@ export default function App() {
   const rightStickRef = useRef<JoystickValue>({ x: 0, y: 0 });
   const [page, setPage] = useState<'move' | 'hand' | 'trajectory'>('move');
   const [handSide, setHandSide] = useState<'left' | 'right'>('left');
-  const [handTargets, setHandTargets] = useState<Record<'left' | 'right', Array<{ position: string; velocity: string; acceleration: string; deceleration: string; effort: string }>>>({
-    left: Array.from({ length: 10 }, () => ({ position: '0', velocity: '0.1', acceleration: '0', deceleration: '0', effort: '0' })),
-    right: Array.from({ length: 10 }, () => ({ position: '0', velocity: '0.1', acceleration: '0', deceleration: '0', effort: '0' })),
+  const [handTargets, setHandTargets] = useState<Record<'left' | 'right', string[]>>({
+    left: Array(10).fill('0'), right: Array(10).fill('0'),
   });
+  const [handPoses, setHandPoses] = useState<HandPose[]>([]);
+  const [handPoseName, setHandPoseName] = useState('');
+  const [confirmRelease, setConfirmRelease] = useState(false);
+  const canSendHand = bridgeState.control_capabilities?.hand_position === true;
+  const canPlay = bridgeState.control_capabilities?.upper_body_playback === true;
   const [trajectories, setTrajectories] = useState<TrajectoryInfo[]>([]);
   const [trajectoryName, setTrajectoryName] = useState('');
   const [sampleRate, setSampleRate] = useState('20');
@@ -213,7 +207,7 @@ export default function App() {
     } else {
       socket?.close();
     }
-    setBridgeState((current) => ({ ...current, armed: false, robot_connected: false }));
+    setBridgeState((current) => ({ ...current, armed: false, robot_connected: false, control_capabilities: undefined }));
     if (notify) setStatusText('已断开');
   }, []);
 
@@ -266,6 +260,16 @@ export default function App() {
               armedRef.current = next.armed;
               return next;
             });
+            const handPayload = message.state as Partial<BridgeState> & {
+              hand_poses?: HandPose[]; hand_feedback?: Record<'left' | 'right', number[]>;
+            };
+            if (Array.isArray(handPayload.hand_poses)) setHandPoses(handPayload.hand_poses);
+            if (handPayload.hand_feedback) {
+              const feedback = handPayload.hand_feedback;
+              setHandTargets({ left: feedback.left.map(String), right: feedback.right.map(String) });
+            }
+            if (message.request_type === 'hand_pose_save') setStatusText('手部预设已保存，尚未执行');
+            if (message.request_type === 'hand_pose_apply' || message.request_type === 'hand_positions') setStatusText('手部目标已发送，请观察抓握结果');
             if (Array.isArray(payload.trajectories)) {
               setTrajectories(payload.trajectories);
             }
@@ -297,7 +301,7 @@ export default function App() {
         socketRef.current = null;
         connectedRef.current = false;
         armedRef.current = false;
-        setBridgeState((current) => ({ ...current, armed: false, robot_connected: false }));
+        setBridgeState((current) => ({ ...current, armed: false, robot_connected: false, control_capabilities: undefined }));
         setStatusText('连接已断开');
       };
     } catch {
@@ -358,25 +362,33 @@ export default function App() {
     }
   };
 
-  const updateHandTarget = (index: number, key: 'position' | 'velocity' | 'acceleration' | 'deceleration' | 'effort', value: string) => {
-    setHandTargets((current) => ({
-      ...current,
-      [handSide]: current[handSide].map((joint, jointIndex) => jointIndex === index ? { ...joint, [key]: value } : joint),
-    }));
+  const handPositions = (): number[] | null => {
+    const inputs = handTargets[handSide];
+    const positions = inputs.map(Number);
+    if (inputs.some((x) => !x.trim()) || positions.some((x) => !Number.isFinite(x) || x < -Math.PI || x > Math.PI)) {
+      setStatusText('位置需为 −π～π rad 的有限数字，空值不会自动转成零');
+      return null;
+    }
+    return positions;
   };
-
   const sendHandTarget = () => {
-    const joints = handTargets[handSide].map((joint, index) => ({
-      index,
-      position: Number(joint.position) || 0,
-      velocity: Number(joint.velocity) || 0,
-      acceleration: Number(joint.acceleration) || 0,
-      deceleration: Number(joint.deceleration) || 0,
-      effort: Number(joint.effort) || 0,
-    }));
-    send({ type: 'hand_target', side: handSide, joints });
+    const positions = handPositions();
+    if (positions) send({ type: 'hand_positions', side: handSide, positions });
   };
-
+  const saveHandPose = () => {
+    const positions = handPositions();
+    if (!handPoseName.trim()) { setStatusText('请填写手部预设名称'); return; }
+    if (positions) send({ type: 'hand_pose_save', name: handPoseName.trim(), side: handSide,
+                         positions, requires_confirmation: confirmRelease });
+  };
+  const applyHandPose = (pose: HandPose) => {
+    if (pose.requires_confirmation) {
+      Alert.alert('确认交接', `请确认选手已接稳奖状，再执行“${pose.name}”。`, [
+        { text: '取消', style: 'cancel' },
+        { text: '已接稳，执行', onPress: () => send({ type: 'hand_pose_apply', name: pose.name, confirmed: true }) },
+      ]);
+    } else send({ type: 'hand_pose_apply', name: pose.name });
+  };
   const refreshTrajectories = useCallback(() => send({ type: 'trajectory_list' }), [send]);
   const startRecording = () => {
     const name = trajectoryName.trim();
@@ -389,7 +401,7 @@ export default function App() {
       setStatusText('采样频率需为 1～100 Hz');
       return;
     }
-    send({ type: 'trajectory_record_start', name, sample_rate_hz: rate, teach_mode: true });
+    send({ type: 'trajectory_record_start', name, sample_rate_hz: rate, teach_mode: false });
   };
   const stopRecording = () => {
     send({ type: 'trajectory_record_stop' });
@@ -412,7 +424,7 @@ export default function App() {
   };
   const playTrajectory = (name: string) => {
     const speed = Number(playbackSpeed);
-    if (!Number.isFinite(speed) || speed <= 0 || speed > 4) {
+    if (!Number.isFinite(speed) || speed < 0.01 || speed > 4) {
       setStatusText('播放速度需为 0.01～4 倍');
       return;
     }
@@ -445,9 +457,11 @@ export default function App() {
           <Text style={styles.stateText}>{bridgeState.state}{bridgeState.armed ? ' · 已解锁' : ' · 未解锁'}</Text>
         </View>
 
+        <Text style={styles.handHint}>{bridgeState.robot_connected ? bridgeState.control_capabilities?.reason || '正在读取机器人执行能力，执行按钮暂不可用' : '连接后读取执行能力'}</Text>
+        {bridgeState.state === 'ESTOP' ? <Pressable style={styles.smallButton} onPress={() => send({ type: 'clear_estop' })}><Text style={styles.smallButtonText}>清除软件急停锁存（不会自动进入 TELEOP）</Text></Pressable> : null}
         <View style={styles.tabs}>
           <Pressable style={[styles.tab, page === 'move' && styles.tabActive]} onPress={() => setPage('move')}><Text style={styles.tabText}>移动控制</Text></Pressable>
-          <Pressable style={[styles.tab, page === 'hand' && styles.tabActive]} onPress={() => setPage('hand')}><Text style={styles.tabText}>灵巧手参数</Text></Pressable>
+          <Pressable style={[styles.tab, page === 'hand' && styles.tabActive]} onPress={() => { setPage('hand'); send({ type: 'hand_pose_list' }); }}><Text style={styles.tabText}>灵巧手预设</Text></Pressable>
           <Pressable style={[styles.tab, page === 'trajectory' && styles.tabActive]} onPress={() => { setPage('trajectory'); refreshTrajectories(); }}><Text style={styles.tabText}>轨迹录制</Text></Pressable>
         </View>
 
@@ -467,10 +481,9 @@ export default function App() {
             <View style={styles.buttonGrid}>
               {MODES.map(([mode, label]) => <Pressable key={mode} style={styles.modeButton} onPress={() => send({ type: 'mode', mode })}><Text style={styles.modeText}>{label}</Text></Pressable>)}
             </View>
-            <Text style={styles.sectionLabel}>手部预设</Text>
-            <View style={styles.buttonGrid}>
-              {PRESETS.map(([action, label]) => <Pressable key={action} style={styles.presetButton} onPress={() => send({ type: 'preset', action })}><Text style={styles.modeText}>{label}</Text></Pressable>)}
-            </View>
+            <Text style={styles.sectionLabel}>携带奖状</Text>
+            <Text style={styles.handHint}>抓稳后由人工使用官方行走；此阶段不播放或保持手臂轨迹。松手请到灵巧手预设页确认执行。</Text>
+            <Pressable style={styles.presetButton} onPress={() => { setPage('hand'); send({ type: 'hand_pose_list' }); }}><Text style={styles.modeText}>选择手部抓握预设</Text></Pressable>
             <Text style={styles.hint}>松开摇杆立即发零速度；切后台或断网会自动停车。</Text>
           </View>
         </View> : page === 'hand' ? <View style={styles.handPanel}>
@@ -483,16 +496,31 @@ export default function App() {
           <View style={styles.sideSwitch}>
             {(['left', 'right'] as const).map((side) => <Pressable key={side} style={[styles.sideButton, handSide === side && styles.sideButtonActive]} onPress={() => setHandSide(side)}><Text style={styles.sideText}>{side === 'left' ? '左手' : '右手'}</Text></Pressable>)}
           </View>
-          <Text style={styles.handHint}>每只手 10 个命令槽。每个输入框标注了安全范围和用途；填写后发送单帧，发送完成仍保持已解锁。</Text>
-          {handTargets[handSide].map((joint, index) => <View key={index} style={styles.jointRow}>
+          <Text style={styles.handHint}>仅编辑位置（rad），不卸力、不设置未确认的速度或力度。±π rad 是编辑范围，不是硬件安全限位。左右手使用各自反馈符号。</Text>
+          <Pressable style={styles.smallButton} onPress={() => send({ type: 'hand_state' })}><Text style={styles.smallButtonText}>读取当前双手位置</Text></Pressable>
+          {handTargets[handSide].map((position, index) => <View key={index} style={styles.jointRow}>
             <Text style={styles.jointName}>关节 {index + 1}</Text>
-            {HAND_FIELDS.map((field) => <View key={field.key} style={styles.fieldCell}>
-              <Text style={styles.fieldLabel}>{field.label} · {field.range}</Text>
-              <TextInput value={joint[field.key]} onChangeText={(value) => updateHandTarget(index, field.key, value)} keyboardType="numeric" style={styles.jointInput} placeholder={field.hint} placeholderTextColor="#6d7885" />
-              <Text style={styles.fieldHint}>{field.hint}</Text>
-            </View>)}
+            <TextInput value={position} onChangeText={(value) => setHandTargets((current) => ({ ...current,
+              [handSide]: current[handSide].map((x, i) => i === index ? value : x),
+            }))} keyboardType="numeric" style={styles.jointInput} />
+            <Text style={styles.fieldHint}>rad</Text>
           </View>)}
-          <Pressable style={styles.sendHandButton} onPress={sendHandTarget}><Text style={styles.armText}>发送单帧</Text></Pressable>
+          <Pressable disabled={!canSendHand || !bridgeState.armed || playbackActive} style={[styles.sendHandButton, (!canSendHand || !bridgeState.armed || playbackActive) && styles.disabledButton]} onPress={sendHandTarget}><Text style={styles.armText}>发送所选手的位置目标</Text></Pressable>
+          <Text style={styles.sectionLabel}>保存手部预设</Text>
+          <TextInput value={handPoseName} onChangeText={setHandPoseName} style={styles.urlInput} placeholder="例如：右手抓奖状 / 右手松开奖状" placeholderTextColor="#6d7885" />
+          <Pressable style={styles.smallButton} onPress={() => setConfirmRelease(!confirmRelease)}><Text style={styles.smallButtonText}>{confirmRelease ? '☑' : '☐'} 执行前确认选手已接稳（松手预设请勾选）</Text></Pressable>
+          <View style={styles.trajectoryActions}>
+            <Pressable style={styles.smallButton} onPress={saveHandPose}><Text style={styles.smallButtonText}>保存新预设</Text></Pressable>
+            <Pressable style={styles.smallButton} onPress={() => send({ type: 'hand_pose_list' })}><Text style={styles.smallButtonText}>刷新预设</Text></Pressable>
+          </View>
+          <Text style={styles.fieldHint}>{bridgeState.last_hand_command || '尚未发送手部目标'}</Text>
+          {handPoses.map((pose) => <View key={pose.name} style={styles.trajectoryRow}>
+            <Text style={styles.trajectoryTitle}>{pose.name} · {pose.side === 'left' ? '左手' : '右手'}{pose.requires_confirmation ? ' · 交接确认' : ''}</Text>
+            <Pressable style={styles.smallButton} onPress={() => { setHandSide(pose.side); setHandTargets((current) => ({ ...current, [pose.side]: pose.positions.map(String) })); setConfirmRelease(pose.requires_confirmation); }}><Text style={styles.smallButtonText}>载入编辑</Text></Pressable>
+            <Pressable disabled={!canSendHand || !bridgeState.armed || playbackActive} style={[styles.smallButton, (!canSendHand || !bridgeState.armed || playbackActive) && styles.disabledButton]} onPress={() => applyHandPose(pose)}><Text style={styles.smallButtonText}>执行</Text></Pressable>
+            <Pressable style={styles.smallButton} onPress={() => send({ type: 'hand_pose_rename', name: pose.name, new_name: handPoseName.trim() })}><Text style={styles.smallButtonText}>改为输入名称</Text></Pressable>
+            <Pressable style={styles.deleteButton} onPress={() => Alert.alert('删除手部预设', `删除“${pose.name}”？`, [{ text: '取消' }, { text: '删除', style: 'destructive', onPress: () => send({ type: 'hand_pose_delete', name: pose.name }) }])}><Text style={styles.smallButtonText}>删除</Text></Pressable>
+          </View>)}
         </View> : <View style={styles.handPanel}>
           <View style={styles.armRow}>
             <Pressable style={[styles.armButton, bridgeState.armed && styles.disarmButton]} onPress={arm}><Text style={styles.armText}>{bridgeState.armed ? '退出 TELEOP' : '进入 TELEOP'}</Text></Pressable>
@@ -505,7 +533,7 @@ export default function App() {
           <Text style={styles.sectionLabel}>播放速度</Text>
           <View style={styles.speedRow}>{(['0.25', '0.5', '1', '2'] as const).map((speed) => <Pressable key={speed} style={[styles.speedButton, playbackSpeed === speed && styles.speedButtonActive]} onPress={() => setPlaybackSpeed(speed)}><Text style={styles.smallButtonText}>{speed}x</Text></Pressable>)}</View>
           <View style={styles.trajectoryActions}>
-            <Pressable disabled={!recording && playbackActive} style={[styles.recordButton, recording && styles.stopRecordButton, !recording && playbackActive && styles.disabledButton]} onPress={recording ? stopRecording : startRecording}><Text style={styles.armText}>{recording ? '停止并保存录制' : '开始上肢示教录制'}</Text></Pressable>
+            <Pressable disabled={!recording && playbackActive} style={[styles.recordButton, recording && styles.stopRecordButton, !recording && playbackActive && styles.disabledButton]} onPress={recording ? stopRecording : startRecording}><Text style={styles.armText}>{recording ? '停止并保存录制' : '开始上肢状态录制'}</Text></Pressable>
             <Pressable style={styles.connectButton} onPress={refreshTrajectories}><Text style={styles.connectText}>刷新列表</Text></Pressable>
           </View>
           <View style={styles.trajectoryActions}>
@@ -518,12 +546,13 @@ export default function App() {
             <Text style={styles.fieldHint}>{recording ? `${bridgeState.recording_frames} 帧 · ${bridgeState.recording_sample_rate_hz ?? sampleRate} Hz` : `${bridgeState.playback_progress_ms} / ${bridgeState.playback_duration_ms} ms · ${playbackPercent}%`}</Text>
             <View style={styles.progressTrack}><View style={[styles.progressValue, { width: `${recording ? 100 : playbackPercent}%` }]} /></View>
           </View>
+          {bridgeState.recording_error ? <Text style={styles.handHint}>{bridgeState.recording_error}</Text> : null}
           <Text style={styles.sectionLabel}>颁奖动作预设</Text>
-          <View style={styles.awardGrid}>{AWARD_PRESETS.map(([name, label]) => { const exists = trajectories.some((item) => item.name === name); const disabled = !exists || playbackActive || recording; return <Pressable key={name} disabled={disabled} style={[styles.awardButton, disabled && styles.disabledButton]} onPress={() => playTrajectory(name)}><Text style={styles.modeText}>{label}{exists ? '' : ' · 未录制'}</Text></Pressable>; })}</View>
-          <Text style={styles.handHint}>{recording ? '机械臂处于仅上肢阻尼示教；腿部不卸力。当前固件没有已确认的灵巧手卸力接口，手指不要强掰。' : '同名轨迹不会再覆盖；每条轨迹可独立播放、改名和删除。'}</Text>
+          <View style={styles.awardGrid}>{AWARD_PRESETS.map(([name, label]) => { const exists = trajectories.some((item) => item.name === name); const carry = name === '单手携带'; const disabled = carry ? playbackActive || recording : !canPlay || !exists || playbackActive || recording; return <Pressable key={name} disabled={disabled} style={[styles.awardButton, disabled && styles.disabledButton]} onPress={() => carry ? setPage('move') : playTrajectory(name)}><Text style={styles.modeText}>{carry ? '单手携带 · 人工行走' : label}{!carry && !exists ? ' · 未录制' : ''}</Text></Pressable>; })}</View>
+          <Text style={styles.handHint}>{recording ? '只采集上肢和双手实际反馈，不改变电机状态。用官方支持的工具制作动作，不强掰关节。' : '同名轨迹不会再覆盖；每条轨迹可独立播放、改名和删除。'}</Text>
           {trajectories.length === 0 ? <Text style={styles.emptyText}>暂无轨迹</Text> : trajectories.map((trajectory) => <View key={trajectory.name} style={styles.trajectoryRow}>
             <View style={styles.trajectoryMeta}><Text style={styles.trajectoryTitle}>{trajectory.name}</Text><Text style={styles.fieldHint}>{trajectory.frames} 帧 · {(trajectory.duration_ms / 1000).toFixed(1)} 秒 · 臂 {trajectory.arm_joints} / 左手 {trajectory.left_hand_joints} / 右手 {trajectory.right_hand_joints}</Text></View>
-            <Pressable disabled={playbackActive || recording} style={[styles.smallButton, (playbackActive || recording) && styles.disabledButton]} onPress={() => playTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>{bridgeState.playback_name === trajectory.name && bridgeState.playback_state === 'playing' ? '播放中' : bridgeState.playback_name === trajectory.name && bridgeState.playback_state === 'paused' ? '已暂停' : '播放'}</Text></Pressable>
+            <Pressable disabled={!canPlay || playbackActive || recording} style={[styles.smallButton, (!canPlay || playbackActive || recording) && styles.disabledButton]} onPress={() => playTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>{bridgeState.playback_name === trajectory.name && bridgeState.playback_state === 'playing' ? '播放中' : bridgeState.playback_name === trajectory.name && bridgeState.playback_state === 'paused' ? '已暂停' : '播放'}</Text></Pressable>
             <Pressable disabled={playbackActive || recording} style={[styles.smallButton, (playbackActive || recording) && styles.disabledButton]} onPress={() => { setSelectedTrajectory(trajectory.name); setRenameDraft(trajectory.name); }}><Text style={styles.smallButtonText}>改名</Text></Pressable>
             <Pressable disabled={playbackActive || recording} style={[styles.deleteButton, (playbackActive || recording) && styles.disabledButton]} onPress={() => deleteTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>删除</Text></Pressable>
             {selectedTrajectory === trajectory.name && <View style={styles.renameRow}><TextInput value={renameDraft} onChangeText={setRenameDraft} style={styles.renameInput} /><Pressable style={styles.smallButton} onPress={() => renameTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>保存</Text></Pressable></View>}

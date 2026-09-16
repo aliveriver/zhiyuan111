@@ -1,4 +1,5 @@
 import asyncio
+import io
 
 import pytest
 
@@ -231,7 +232,7 @@ def test_upper_body_recording_respects_rate_and_keeps_multiple_names():
 
 def test_upper_body_playback_reports_pause_progress_and_completion():
     robot = UpperBodyRobot()
-    controller = BridgeController(robot, timeout=0.01)
+    controller = BridgeController(robot, timeout=1.0)
     frame = robot.upper_body_state()
     controller.trajectories["递出"] = [
         {"type": "upper_body", "t_ms": 0, **frame},
@@ -243,7 +244,7 @@ def test_upper_body_playback_reports_pause_progress_and_completion():
         await controller.handle("s1", {"type": "arm", "enabled": True, "sequence": 1})
         state = await controller.handle("s1", {"type": "trajectory_play", "name": "递出", "sequence": 2})
         assert state["playback_state"] == "playing"
-        assert not await controller.watchdog(now=10**9)
+        assert not await controller.watchdog()
         with pytest.raises(BridgeError, match="正在播放"):
             await controller.handle("s1", {"type": "trajectory_play", "name": "递出", "sequence": 3})
         paused = await controller.handle("s1", {"type": "trajectory_play", "command": "pause", "sequence": 4})
@@ -270,9 +271,120 @@ def test_upper_body_operation_explains_wrong_system_state():
         await controller.handle("s1", {"type": "arm", "enabled": True, "sequence": 1})
         with pytest.raises(BridgeError, match="Business") as error:
             await controller.handle("s1", {
-                "type": "trajectory_record_start", "name": "测试", "sample_rate_hz": 20, "sequence": 2,
+                "type": "trajectory_record_start", "name": "测试", "sample_rate_hz": 20, "teach_mode": True, "sequence": 2,
             })
         assert error.value.code == "upper_body_unavailable"
         assert controller.recording_name is None
 
+    run(scenario())
+
+
+def test_recording_defaults_to_read_only_and_replays_repeatedly(tmp_path):
+    robot = UpperBodyRobot()
+    robot.prepare_error = "Develop_MC unavailable"
+    path = tmp_path / "trajectories.json"
+    path.write_text('{"旧轨迹": []}', encoding="utf-8")
+    controller = BridgeController(robot, trajectory_path=path)
+
+    async def scenario():
+        await controller.register("s", "phone")
+        await controller.handle("s", {"type": "arm", "enabled": True, "sequence": 1})
+        await controller.handle("s", {"type": "trajectory_record_start", "name": "新轨迹", "sequence": 2})
+        await controller.handle("s", {"type": "trajectory_record_stop", "sequence": 3})
+        assert not any(call[0] in ("teach", "prepare_teaching", "end_teaching", "upper_body") for call in robot.calls)
+        loaded = BridgeController(robot, trajectory_path=path)
+        assert "旧轨迹" in loaded.trajectories
+        assert len(loaded.trajectories["新轨迹"][0]["arm"]) == 14
+        robot.prepare_error = None
+        for seq in (4, 5):
+            await controller.handle("s", {"type": "trajectory_play", "name": "新轨迹", "sequence": seq})
+            await controller.playback_task
+            assert (await controller.snapshot()).playback_state == "completed"
+        assert sum(call[0] == "upper_body" for call in robot.calls) == 2
+        await controller.close()
+    run(scenario())
+
+
+@pytest.mark.parametrize("activity", ["record", "play"])
+def test_watchdog_cancels_activities_without_opening_hands(activity):
+    robot = UpperBodyRobot()
+    controller = BridgeController(robot)
+    controller.trajectories["test"] = [{"type": "upper_body", "t_ms": 10000, **robot.upper_body_state()}]
+
+    async def scenario():
+        await controller.register("s", "phone")
+        await controller.handle("s", {"type": "arm", "enabled": True, "sequence": 1}, now=10)
+        message = {"type": "trajectory_record_start" if activity == "record" else "trajectory_play",
+                   "name": "test2" if activity == "record" else "test", "sequence": 2}
+        await controller.handle("s", message, now=10)
+        assert await controller.watchdog(now=11)
+        await asyncio.sleep(0)
+        assert not controller.armed
+        assert controller.recording_name is None
+        assert controller.playback_task is None
+        assert robot.calls[-1] == ("stop",)
+        assert not any(call[0] in ("hand", "hand_target", "upper_body") for call in robot.calls)
+    run(scenario())
+
+
+def test_hand_release_requires_explicit_confirmation_and_preserves_other_hand(tmp_path):
+    robot = MockRobot(io.StringIO())
+    controller = BridgeController(robot, hand_pose_path=tmp_path / "hand_poses.json")
+
+    async def scenario():
+        await controller.register("s", "phone")
+        await controller.handle("s", {"type": "hand_pose_save", "name": "松手", "side": "right",
+                                      "positions": [0.1] * 10, "requires_confirmation": True, "sequence": 1})
+        await controller.handle("s", {"type": "arm", "enabled": True, "sequence": 2})
+        with pytest.raises(BridgeError) as error:
+            await controller.handle("s", {"type": "hand_pose_apply", "name": "松手", "sequence": 3})
+        assert error.value.code == "confirmation_required"
+        assert robot._positions["right"] == [0] * 10
+        await controller.handle("s", {"type": "hand_pose_apply", "name": "松手", "confirmed": True, "sequence": 4})
+        assert robot._positions["right"] == [0.1] * 10
+        assert robot._positions["left"] == [0] * 10
+        await controller.disconnect("s")
+        assert robot._positions["right"] == [0.1] * 10
+    run(scenario())
+
+
+def test_blocked_backend_rejects_new_and_legacy_hand_paths_before_commands():
+    class Blocked(UpperBodyRobot):
+        def control_capabilities(self):
+            return {"backend": "x2", "hand_position": False, "upper_body_playback": False,
+                    "teaching": False, "reason": "MC ownership not confirmed"}
+    robot = Blocked()
+    controller = BridgeController(robot)
+    controller.trajectories["test"] = [{"type": "upper_body", "t_ms": 0, **robot.upper_body_state()}]
+
+    async def scenario():
+        await controller.register("s", "phone")
+        await controller.handle("s", {"type": "arm", "enabled": True, "sequence": 1})
+        for seq, message in enumerate([
+            {"type": "preset", "action": "grip"},
+            {"type": "hand_target", "side": "left", "joints": []},
+            {"type": "hand_params", "hand": "left", "parameters": []},
+            {"type": "hand_positions", "side": "left", "positions": [0.1] * 10},
+            {"type": "trajectory_play", "name": "test"},
+        ], 2):
+            with pytest.raises(BridgeError, match="ownership"):
+                await controller.handle("s", {**message, "sequence": seq})
+        assert robot.calls == []
+    run(scenario())
+
+
+def test_recording_rejects_partial_feedback_without_sticking_in_recording():
+    robot = UpperBodyRobot()
+    state = robot.upper_body_state()
+    state["right_hand"] = []
+    robot.upper_body_state = lambda: state
+    controller = BridgeController(robot)
+    async def scenario():
+        await controller.register("s", "phone")
+        await controller.handle("s", {"type": "arm", "enabled": True, "sequence": 1})
+        with pytest.raises(BridgeError) as error:
+            await controller.handle("s", {"type": "trajectory_record_start", "name": "test", "sequence": 2})
+        assert error.value.code == "state_unavailable"
+        assert controller.recording_name is None
+        assert not controller.trajectories
     run(scenario())

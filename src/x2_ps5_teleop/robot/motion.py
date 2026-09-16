@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import copy
 import time
 import sys
 from typing import Any, TextIO
@@ -52,6 +53,23 @@ class RobotInterface:
 @dataclass
 class MockRobot(RobotInterface):
     stream: TextIO
+    _positions: dict[str, list[float]] = field(default_factory=lambda: {
+        "left": [0.0] * HAND_SLOT_COUNT, "right": [0.0] * HAND_SLOT_COUNT,
+    })
+    _arm: list[dict[str, Any]] = field(default_factory=lambda: [
+        {"name": f"{side}_{joint}_joint", "position": 0.0, "velocity": 0.0, "effort": 0.0}
+        for side in ("left", "right")
+        for joint in ("shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow",
+                      "wrist_yaw", "wrist_pitch", "wrist_roll")
+    ])
+
+    def control_capabilities(self) -> dict[str, Any]:
+        return {"backend": "mock", "hand_position": True, "upper_body_playback": True,
+                "teaching": False, "reason": "模拟模式：反馈和执行均为模拟，不代表真机验收"}
+
+    def hand_positions(self, side: str, positions: list[float]) -> None:
+        self._positions[side] = list(positions)
+        print(f"HAND POSITION side={side} joints={len(positions)}", file=self.stream, flush=True)
 
     def move(self, linear_x: float, linear_y: float, angular_z: float) -> None:
         print(f"MOVE vx={linear_x:.3f} vy={linear_y:.3f} wz={angular_z:.3f}", file=self.stream, flush=True)
@@ -66,16 +84,26 @@ class MockRobot(RobotInterface):
         print(f"HAND ACTION={action.value}", file=self.stream, flush=True)
 
     def hand_target(self, side: str, joints: list[tuple[int, float, float, float, float, float]]) -> None:
+        self._positions[side] = [joint[1] for joint in joints]
         print(f"HAND TARGET side={side} joints={len(joints)}", file=self.stream, flush=True)
 
     def arm_target(self, joints: list[dict[str, Any]]) -> None:
+        self._arm = copy.deepcopy(joints)
         print(f"ARM TARGET joints={len(joints)}", file=self.stream, flush=True)
 
     def upper_body_target(self, frame: dict[str, Any]) -> None:
         self.arm_target(frame.get("arm", []))
+        for side in ("left", "right"):
+            if frame.get(f"{side}_hand"):
+                self.hand_positions(side, [j["position"] for j in frame[f"{side}_hand"]])
 
     def upper_body_state(self) -> dict[str, Any] | None:
-        return None
+        return {"arm": copy.deepcopy(self._arm), **{
+            f"{side}_hand": [{"name": f"{side}_{i}", "position": pos,
+                             "velocity": 0.0, "effort": 0.0}
+                            for i, pos in enumerate(self._positions[side])]
+            for side in ("left", "right")
+        }}
 
     def prepare_upper_body_teaching(self) -> None:
         print("ARM TEACHING prepare", file=self.stream, flush=True)
@@ -95,6 +123,22 @@ class MockRobot(RobotInterface):
 
 class X2RosRobot(RobotInterface):
     """发布官方文档中确认的 AimDK 消息/服务类型。"""
+
+    def control_capabilities(self) -> dict[str, Any]:
+        # No operator override: the v0.9.7 integration has no confirmed
+        # independent hand ownership or interruptible arm animation backend.
+        return {"backend": "x2", "hand_position": False, "upper_body_playback": False,
+                "teaching": False,
+                "reason": "当前固件的独立手部控制与上肢动画停止链路尚未确认；可录制状态和编辑预设，真机执行未开放"}
+
+    def _require_control(self, capability: str) -> None:
+        capabilities = self.control_capabilities()
+        if not capabilities[capability]:
+            raise RuntimeError(capabilities["reason"])
+
+    def hand_positions(self, side: str, positions: list[float]) -> None:
+        self._require_control("hand_position")
+        raise RuntimeError("尚未安装经过验证的灵巧手执行后端")
 
     def __init__(
         self,
@@ -146,6 +190,8 @@ class X2RosRobot(RobotInterface):
         self.arm_pub = self.node.create_publisher(JointCommandArray, "/aima/hal/joint/arm/command", 10)
         self._arm_state: Any = None
         self._hand_state: Any = None
+        self._arm_received_at = 0.0
+        self._hand_received_at = 0.0
         self.node.create_subscription(JointStateArray, "/aima/hal/joint/arm/state", self._on_arm_state, self._state_qos)
         self.node.create_subscription(HandStateArray, "/aima/hal/joint/hand/state", self._on_hand_state, self._state_qos)
         self.mode_client = self.node.create_client(SetMcAction, "/aimdk_5Fmsgs/srv/SetMcAction")
@@ -245,6 +291,7 @@ class X2RosRobot(RobotInterface):
         self._wait_for_result(future, "切换运动模式", timeout=1.0)
 
     def hand_action(self, action: HandAction) -> None:
+        self._require_control("hand_position")
         side, positions = HAND_PRESETS[action]
         msg = self._msg[6]()
         msg.header = self._msg[4]()
@@ -257,6 +304,7 @@ class X2RosRobot(RobotInterface):
         self.hand_pub.publish(msg)
 
     def hand_target(self, side: str, joints: list[tuple[int, float, float, float, float, float]]) -> None:
+        self._require_control("hand_position")
         if side not in ("left", "right"):
             raise ValueError("side 必须是 left 或 right")
         msg = self._msg[6]()
@@ -275,15 +323,21 @@ class X2RosRobot(RobotInterface):
 
     def _on_arm_state(self, msg) -> None:
         self._arm_state = msg
+        self._arm_received_at = time.monotonic()
 
     def _on_hand_state(self, msg) -> None:
         self._hand_state = msg
+        self._hand_received_at = time.monotonic()
 
     def upper_body_state(self) -> dict[str, Any] | None:
         if not self._rclpy.ok():
             return None
-        self._rclpy.spin_once(self.node, timeout_sec=0.0)
-        if self._arm_state is None and self._hand_state is None:
+        # Drain a bounded number of callbacks so both subscriptions can update.
+        for _ in range(4):
+            self._rclpy.spin_once(self.node, timeout_sec=0.0)
+        now = time.monotonic()
+        if (self._arm_state is None or self._hand_state is None
+                or now - self._arm_received_at > 0.5 or now - self._hand_received_at > 0.5):
             return None
         def joints(values):
             return [{"name": str(item.name), "position": float(item.position), "velocity": float(getattr(item, "velocity", 0.0)),
@@ -295,6 +349,7 @@ class X2RosRobot(RobotInterface):
         }
 
     def arm_target(self, joints: list[dict[str, Any]]) -> None:
+        self._require_control("upper_body_playback")
         msg = self._msg[8]()
         msg.header = self._msg[4]()
         msg.header.stamp = self._now().to_msg()
@@ -346,6 +401,7 @@ class X2RosRobot(RobotInterface):
 
     def prepare_upper_body_teaching(self) -> None:
         self._require_develop_mc("上肢示教录制")
+        self._require_control("teaching")
         state = self.upper_body_state()
         arm_count = len(state.get("arm", [])) if state else 0
         if arm_count != 14:
@@ -362,6 +418,7 @@ class X2RosRobot(RobotInterface):
 
     def prepare_upper_body_playback(self, frame: dict[str, Any]) -> None:
         self._require_develop_mc("上肢轨迹播放")
+        self._require_control("upper_body_playback")
         arm = frame.get("arm", [])
         if len(arm) != 14:
             raise RuntimeError(f"轨迹机械臂关节数应为 14，实际为 {len(arm)}")
@@ -374,8 +431,11 @@ class X2RosRobot(RobotInterface):
         current = str(response.cur_state)
         if current != "Develop_MC":
             raise RuntimeError(
-                f"当前系统状态为 {current}；{operation}需要 Develop_MC。"
-                "请由现场人员确认物理急停后切换系统状态"
+                f"当前系统状态为 {current}；{operation}已被 HAL 控制保护拦截。"
+                "现有实现要求 Develop_MC，但已调查的 X2 v0.9.7 未配置该状态；"
+                "且官方 Develop_MC 会停用全身原生运控，不能保证腿部站立。"
+                "请先确认本固件支持的 MC 上肢控制链路，不要强制切换状态或绕过检查。"
+                "详见 docs/X2_V0_9_7_CONTROL_INVESTIGATION.md"
             )
 
     def _hand_command(self, side: str, index: int, position: float, velocity: float = 0.1, acceleration: float = 0.0, deceleration: float = 0.0, effort: float = 0.0):
