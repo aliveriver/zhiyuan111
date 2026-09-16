@@ -165,7 +165,13 @@ def upload(content: bytes, host: str, control_path: str | None, remote_path: str
     if control_path:
         command += ["-S", control_path]
     command += [host, "python3 -c " + shlex.quote(code)]
-    result = subprocess.run(command, input=content, capture_output=True, timeout=3, check=True)
+    try:
+        result = subprocess.run(command, input=content, capture_output=True, timeout=3, check=True)
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.decode(errors="replace").strip() or f"退出码 {exc.returncode}"
+        raise RuntimeError(f"上传动画到 {host} 失败：{detail}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"上传动画到 {host} 超时；请检查 SSH 连通性和认证") from exc
     if result.stdout.decode().strip() != digest:
         raise RuntimeError("soc0 动画文件哈希校验失败")
 
