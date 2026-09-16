@@ -33,6 +33,38 @@
 
 ## 操作命令
 
+### ROS 接口只读核对
+
+`source /agibot/software/cobridge/setup.bash` 在部分 v0.9.7 镜像中不会完整导出
+消息工作区。因此仅执行 `ros2 interface show aimdk_msgs/...` 可能得到
+`Unknown package 'aimdk_msgs'`，这只表示本地 CLI 的环境不完整，不表示 MC 服务不存在。
+在 PC2 上先执行下面的环境设置；它不会切换系统状态、发布命令或调用服务：
+
+```bash
+cd /home/run/zhiyuan111
+source /agibot/software/cobridge/setup.bash
+export PYTHONPATH="$PWD/src:/agibot/software/common/local/lib/python3.10/dist-packages:/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:${PYTHONPATH:-}"
+export AMENT_PREFIX_PATH="/agibot/software/common:/agibot/software/ec:${AMENT_PREFIX_PATH:-}"
+export LD_LIBRARY_PATH="/agibot/software/common/lib:/agibot/software/ec/lib:${LD_LIBRARY_PATH:-}"
+export LD_PRELOAD="/agibot/software/common/lib/libaimdk_msgs__rosidl_generator_py.so${LD_PRELOAD:+:$LD_PRELOAD}"
+python3 -c 'import aimdk_msgs; print(aimdk_msgs.__file__)'
+ros2 pkg prefix aimdk_msgs
+ros2 interface show aimdk_msgs/srv/SetMcPresetMotion
+ros2 interface show aimdk_msgs/msg/McControlArea
+ros2 interface show aimdk_msgs/msg/McPresetMotion
+ros2 node list | grep -Ei 'mc|aim|ethercat'
+ros2 service list -t | grep -Ei 'Mc|mc|Preset|Dcu|dcu'
+```
+
+节点名必须以 `ros2 node list` 的实际结果为准；不要假定是
+`/mc_ros2_node2373`。如果 `ros2 service type /aimdk_5Fmsgs/srv/SetMcPresetMotion`
+能返回类型、但 `ros2 interface show` 仍找不到包，说明 ROS 图可见而本机接口索引未加载，
+应先修复上述环境，不要重试动画。
+
+AimDK 的 `ResponseHeader.code=0` 表示请求成功；`state=400` 是
+`CommonState.RUNNING`，表示任务已接受并正在执行，不能把它当成 HTTP 400 或拒绝。
+仍需订阅 `/aima/mc/common/state` 确认实际播放和停止，不要仅凭服务响应判定动作已完成。
+
 按 [PC2 部署说明](PC2_DEPLOYMENT.md) 设置 ROS 环境，工作目录 `/home/run/zhiyuan111`，`PYTHONPATH` 包含 `$PWD/src`。首次诊断建议使用系统 Python 3.10。每次使用一个新的输出目录。
 
 默认只读取并生成本地文件，不上传、不发动画请求：

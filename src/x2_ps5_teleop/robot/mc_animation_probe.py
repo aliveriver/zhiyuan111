@@ -137,8 +137,12 @@ class Probe:
         request.ani_path = path
         request.interrupt = interrupt
         response = self.call(self.motion, request).response
-        if response.header.code != 1:
-            raise RuntimeError(f"MC 拒绝动画：code={response.header.code}, state={response.state.value}")
+        code = int(response.header.code)
+        state = int(response.state.value)
+        # AimDK ResponseHeader uses code=0 for a successful request.  The
+        # CommonState value is separate: 400 means the task is RUNNING.
+        if code != 0:
+            raise RuntimeError(f"MC 拒绝动画（未确认执行）：code={code}, state={state}")
         return {"task_id": response.task_id, "state": response.state.value}
 
     def close(self):

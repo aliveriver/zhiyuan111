@@ -253,7 +253,8 @@ class X2RosRobot(RobotInterface):
         future = self.source_client.call_async(req)
         response = self._wait_for_result(future, "注册 AimDK 输入源")
         task = response.response
-        if task.header.code != 1:
+        # AimDK ResponseHeader uses code=0 for a successful request.
+        if task.header.code != 0:
             raise RuntimeError(f"注册 AimDK 输入源被拒绝: code={task.header.code}, state={task.state.value}")
 
     def _verify_hand_type(self) -> None:
