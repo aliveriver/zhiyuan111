@@ -30,6 +30,40 @@ class RecordingRobot:
         self.calls.append(("close",))
 
 
+class UpperBodyRobot(RecordingRobot):
+    def __init__(self):
+        super().__init__()
+        self.sample_count = 0
+        self.prepare_error = None
+
+    def upper_body_state(self):
+        self.sample_count += 1
+        return {
+            "arm": [{"name": f"arm_{index}", "position": self.sample_count / 100} for index in range(14)],
+            "left_hand": [{"name": f"left_{index}", "position": 0.1} for index in range(10)],
+            "right_hand": [{"name": f"right_{index}", "position": 0.2} for index in range(10)],
+        }
+
+    def prepare_upper_body_teaching(self):
+        if self.prepare_error:
+            raise RuntimeError(self.prepare_error)
+        self.calls.append(("prepare_teaching",))
+
+    def upper_body_teaching_step(self):
+        self.calls.append(("teach",))
+
+    def end_upper_body_teaching(self):
+        self.calls.append(("end_teaching",))
+
+    def prepare_upper_body_playback(self, frame):
+        if self.prepare_error:
+            raise RuntimeError(self.prepare_error)
+        self.calls.append(("prepare_playback", len(frame["arm"])))
+
+    def upper_body_target(self, frame):
+        self.calls.append(("upper_body", frame["t_ms"]))
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -146,11 +180,99 @@ def test_trajectory_record_list_rename_delete_and_playback():
         await controller.handle("s1", {"type": "preset", "action": "open", "sequence": 3}, now=1.1)
         await controller.handle("s1", {"type": "trajectory_record_stop", "sequence": 4}, now=1.2)
         listing = await controller.handle("s1", {"type": "trajectory_list", "sequence": 5}, now=1.2)
-        assert listing["trajectories"] == [{"name": "抓取", "frames": 1}]
+        assert listing["trajectories"] == [{
+            "name": "抓取",
+            "frames": 1,
+            "duration_ms": 100,
+            "arm_joints": 0,
+            "left_hand_joints": 0,
+            "right_hand_joints": 0,
+        }]
         await controller.handle("s1", {"type": "trajectory_rename", "old_name": "抓取", "new_name": "抓取2", "sequence": 6}, now=1.2)
         await controller.handle("s1", {"type": "trajectory_play", "name": "抓取2", "sequence": 7}, now=1.2)
         assert robot.calls[-1] == ("hand", HandAction.RT)
         await controller.handle("s1", {"type": "trajectory_delete", "name": "抓取2", "sequence": 8}, now=1.2)
         assert (await controller.handle("s1", {"type": "trajectory_list", "sequence": 9}, now=1.2))["trajectories"] == []
+
+    run(scenario())
+
+
+def test_upper_body_recording_respects_rate_and_keeps_multiple_names():
+    robot = UpperBodyRobot()
+    controller = BridgeController(robot)
+
+    async def scenario():
+        await controller.register("s1", "phone")
+        await controller.handle("s1", {"type": "arm", "enabled": True, "sequence": 1})
+        await controller.handle("s1", {
+            "type": "trajectory_record_start", "name": "动作一", "sample_rate_hz": 20, "sequence": 2,
+        })
+        await asyncio.sleep(0.17)
+        await controller.handle("s1", {"type": "trajectory_record_stop", "sequence": 3})
+        first_frames = controller.trajectories["动作一"]
+        assert 3 <= len(first_frames) <= 5
+        deltas = [b["t_ms"] - a["t_ms"] for a, b in zip(first_frames, first_frames[1:])]
+        assert all(35 <= delta <= 80 for delta in deltas)
+
+        with pytest.raises(BridgeError, match="已存在"):
+            await controller.handle("s1", {
+                "type": "trajectory_record_start", "name": "动作一", "sample_rate_hz": 20, "sequence": 4,
+            })
+        await controller.handle("s1", {
+            "type": "trajectory_record_start", "name": "动作二", "sample_rate_hz": 10, "sequence": 5,
+        })
+        await controller.handle("s1", {"type": "trajectory_record_stop", "sequence": 6})
+        listing = await controller.handle("s1", {"type": "trajectory_list", "sequence": 7})
+        assert [item["name"] for item in listing["trajectories"]] == ["动作一", "动作二"]
+        assert all(item["arm_joints"] == 14 for item in listing["trajectories"])
+
+    run(scenario())
+
+
+def test_upper_body_playback_reports_pause_progress_and_completion():
+    robot = UpperBodyRobot()
+    controller = BridgeController(robot, timeout=0.01)
+    frame = robot.upper_body_state()
+    controller.trajectories["递出"] = [
+        {"type": "upper_body", "t_ms": 0, **frame},
+        {"type": "upper_body", "t_ms": 80, **frame},
+    ]
+
+    async def scenario():
+        await controller.register("s1", "phone")
+        await controller.handle("s1", {"type": "arm", "enabled": True, "sequence": 1})
+        state = await controller.handle("s1", {"type": "trajectory_play", "name": "递出", "sequence": 2})
+        assert state["playback_state"] == "playing"
+        assert not await controller.watchdog(now=10**9)
+        with pytest.raises(BridgeError, match="正在播放"):
+            await controller.handle("s1", {"type": "trajectory_play", "name": "递出", "sequence": 3})
+        paused = await controller.handle("s1", {"type": "trajectory_play", "command": "pause", "sequence": 4})
+        assert paused["playback_state"] == "paused"
+        await asyncio.sleep(0.03)
+        resumed = await controller.handle("s1", {"type": "trajectory_play", "command": "resume", "sequence": 5})
+        assert resumed["playback_state"] == "playing"
+        await asyncio.wait_for(controller.playback_task, timeout=0.5)
+        snapshot = await controller.snapshot()
+        assert snapshot.playback_state == "completed"
+        assert snapshot.playback_progress_ms == 80
+        assert ("upper_body", 80) in robot.calls
+
+    run(scenario())
+
+
+def test_upper_body_operation_explains_wrong_system_state():
+    robot = UpperBodyRobot()
+    robot.prepare_error = "当前系统状态为 Business；上肢示教录制需要 Develop_MC"
+    controller = BridgeController(robot)
+
+    async def scenario():
+        await controller.register("s1", "phone")
+        await controller.handle("s1", {"type": "arm", "enabled": True, "sequence": 1})
+        with pytest.raises(BridgeError, match="Business") as error:
+            await controller.handle("s1", {
+                "type": "trajectory_record_start", "name": "测试", "sample_rate_hz": 20, "sequence": 2,
+            })
+        assert error.value.code == "upper_body_unavailable"
+        assert controller.recording_name is None
 
     run(scenario())

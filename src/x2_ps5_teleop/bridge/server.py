@@ -10,6 +10,7 @@ from pathlib import Path
 import secrets
 import sys
 from typing import Any
+from websockets.exceptions import ConnectionClosed
 
 from .controller import BridgeController, BridgeError
 from ..robot.motion import MockRobot, X2RosRobot
@@ -52,7 +53,7 @@ class TeleopBridgeServer:
                 try:
                     message = self._decode(raw)
                     state = await self.controller.handle(session_id, message)
-                    await self._send(session_id, {"type": "ack", "sequence": message.get("sequence"), "state": state})
+                    await self._send(session_id, {"type": "ack", "sequence": message.get("sequence"), "request_type": message.get("type"), "state": state})
                     await self._broadcast()
                 except BridgeError as exc:
                     LOGGER.warning("控制消息失败 session=%s code=%s message=%s", session_id, exc.code, exc.message)
@@ -60,6 +61,8 @@ class TeleopBridgeServer:
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     LOGGER.exception("解析控制消息失败 session=%s", session_id)
                     await self._send_error(session_id, "invalid_message", str(exc))
+                except ConnectionClosed:
+                    break
         except BridgeError as exc:
             await self._send_raw(websocket, {"type": "error", "code": exc.code, "message": exc.message})
             await websocket.close(code=1008, reason=exc.code)
