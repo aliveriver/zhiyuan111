@@ -22,6 +22,7 @@ HAND_AXES = (
     "middle_pip", "ring_abad", "ring_pip", "pinky_abad", "pinky_pip",
 )
 HAND_NAMES = tuple(f"{side}_{joint}_joint" for side in ("left", "right") for joint in HAND_AXES)
+WAIST_NAMES = ("waist_pitch_joint", "waist_roll_joint", "waist_yaw_joint")
 UPPER_NAMES = ARM_NAMES + HAND_NAMES
 TICK_MS = 2
 MAX_ROWS = 150_001  # Bound resources: at most five minutes after speed scaling.
@@ -47,6 +48,18 @@ def positions(frame: dict[str, Any]) -> dict[str, float]:
     return result
 
 
+def waist_positions(frame: dict[str, Any]) -> dict[str, float]:
+    """Return the explicitly supported waist channels from a state frame."""
+    waist = frame.get("waist")
+    if not isinstance(waist, list) or len(waist) != len(WAIST_NAMES):
+        raise ValueError("恒定腰部方案需要 pitch、roll、yaw 三个腰部关节")
+    result = {item.get("name"): finite(item.get("position")) for item in waist
+              if isinstance(item, dict)}
+    if set(result) != set(WAIST_NAMES):
+        raise ValueError("腰部必须包含 3 个唯一的实机关节名称")
+    return {name: result[name] for name in WAIST_NAMES}
+
+
 @dataclass(frozen=True)
 class AnimationCSV:
     content: bytes
@@ -58,17 +71,20 @@ class AnimationCSV:
         return hashlib.sha256(self.content).hexdigest()
 
 
-def compile_animation(frames: list[dict[str, Any]], speed: float = 1.0) -> AnimationCSV:
+def compile_animation(frames: list[dict[str, Any]], speed: float = 1.0,
+                      *, include_waist: bool = False) -> AnimationCSV:
     """Linearly resample signed feedback at the installed runner's 500 Hz.
 
-    No velocities, efforts, gains, head, waist, leg or root-motion columns are
-    copied from the recording. Unequal duplicate timestamps are rejected.
+    No velocities, efforts, gains, head, leg or root-motion columns are copied
+    from the recording. Waist columns are opt-in and must be present in every
+    frame when enabled. Unequal duplicate timestamps are rejected.
     """
     speed = finite(speed)
     if not 0.01 <= speed <= 4:
         raise ValueError("播放速度必须为 0.01～4 倍")
     times: list[float] = []
     samples: list[dict[str, float]] = []
+    names = UPPER_NAMES + (WAIST_NAMES if include_waist else ())
     for frame in frames:
         if frame.get("type") != "upper_body":
             raise ValueError("MC 动画只接受 upper_body 状态帧")
@@ -76,6 +92,8 @@ def compile_animation(frames: list[dict[str, Any]], speed: float = 1.0) -> Anima
         if timestamp < 0 or (times and timestamp < times[-1]):
             raise ValueError("时间戳必须非负且递增")
         sample = positions(frame)
+        if include_waist:
+            sample.update(waist_positions(frame))
         if times and timestamp == times[-1]:
             if sample != samples[-1]:
                 raise ValueError("同一时间戳含不同姿态，无法确定运动速度")
@@ -90,7 +108,7 @@ def compile_animation(frames: list[dict[str, Any]], speed: float = 1.0) -> Anima
         raise ValueError("变速后的动画不能超过五分钟")
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\n")
-    writer.writerow(["timeMS", *(f"command_pos::{name}" for name in UPPER_NAMES)])
+    writer.writerow(["timeMS", *(f"command_pos::{name}" for name in names)])
     for tick in range(rows):
         timestamp = min(times[-1], times[0] + tick * TICK_MS * speed)
         right = min(len(times) - 1, bisect.bisect_right(times, timestamp))
@@ -98,14 +116,17 @@ def compile_animation(frames: list[dict[str, Any]], speed: float = 1.0) -> Anima
         span = times[right] - times[left]
         ratio = (timestamp - times[left]) / span if span else 0
         values = [samples[left][name] + ratio * (samples[right][name] - samples[left][name])
-                  for name in UPPER_NAMES]
+                  for name in names]
         writer.writerow([tick * TICK_MS, *(format(value, ".9g") for value in values)])
     return AnimationCSV(output.getvalue().encode("ascii"), rows, duration)
 
 
-def hold_animation(frame: dict[str, Any], duration_ms: int = 1000) -> AnimationCSV:
+def hold_animation(frame: dict[str, Any], duration_ms: int = 1000,
+                   *, include_waist: bool | None = None) -> AnimationCSV:
     """Candidate interruption resource: measured pose, never a neutral pose."""
+    if include_waist is None:
+        include_waist = "waist" in frame
     return compile_animation([
         {**frame, "type": "upper_body", "t_ms": 0},
         {**frame, "type": "upper_body", "t_ms": duration_ms},
-    ])
+    ], include_waist=include_waist)
