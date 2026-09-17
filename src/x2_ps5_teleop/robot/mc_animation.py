@@ -60,6 +60,16 @@ def waist_positions(frame: dict[str, Any]) -> dict[str, float]:
     return {name: result[name] for name in WAIST_NAMES}
 
 
+def all_positions(frame: dict[str, Any], *, include_waist: bool | None = None) -> dict[str, float]:
+    """Validate and return the channels that a compiled animation controls."""
+    if include_waist is None:
+        include_waist = "waist" in frame
+    result = positions(frame)
+    if include_waist:
+        result.update(waist_positions(frame))
+    return result
+
+
 @dataclass(frozen=True)
 class AnimationCSV:
     content: bytes
@@ -91,9 +101,7 @@ def compile_animation(frames: list[dict[str, Any]], speed: float = 1.0,
         timestamp = finite(frame.get("t_ms"))
         if timestamp < 0 or (times and timestamp < times[-1]):
             raise ValueError("时间戳必须非负且递增")
-        sample = positions(frame)
-        if include_waist:
-            sample.update(waist_positions(frame))
+        sample = all_positions(frame, include_waist=include_waist)
         if times and timestamp == times[-1]:
             if sample != samples[-1]:
                 raise ValueError("同一时间戳含不同姿态，无法确定运动速度")

@@ -38,7 +38,12 @@ def analyze_waist_motion(trace: list[dict], phase_key: str = "mc") -> dict:
         if not mc_state:
             continue
 
-        player_state = mc_state.get("player_state")
+        player_state = mc_state.get("player_state_name")
+        if not player_state:
+            # Older probe traces stored the numeric ROS enum only.
+            player_state = {0: "IDLE", 1: "PRE_PLAYING", 2: "PLAYING",
+                            3: "INTERRUPTING", 4: "ERROR"}.get(
+                                mc_state.get("player_state"))
         waist_cmd = sample.get("waist_command", {})
 
         if player_state in phases and waist_cmd:
@@ -70,7 +75,7 @@ def analyze_waist_motion(trace: list[dict], phase_key: str = "mc") -> dict:
     return results
 
 
-def compare_validations(val1_dir: Path, val2_dir: Path) -> None:
+def compare_validations(val1_dir: Path, val2_dir: Path) -> dict[str, Any]:
     """Compare Validation 1 (extended) vs Validation 2 (with waist)."""
     print("=" * 80)
     print("MC Animation Validation Results Comparison")
@@ -132,6 +137,7 @@ def compare_validations(val1_dir: Path, val2_dir: Path) -> None:
     val1_playing = val1_waist.get("PLAYING", {}).get("joints", {})
     val2_playing = val2_waist.get("PLAYING", {}).get("joints", {})
 
+    comparison = {"validation_1": val1_waist, "validation_2": val2_waist}
     if val1_playing and val2_playing:
         print("\nWaist Pitch Range Comparison (PLAYING phase):")
         val1_pitch_range = val1_playing.get("waist_pitch_joint", {}).get("range", 0)
@@ -140,6 +146,10 @@ def compare_validations(val1_dir: Path, val2_dir: Path) -> None:
         print(f"  Validation 1 (Extended):    {val1_pitch_range:.6f} rad")
         print(f"  Validation 2 (With Waist):   {val2_pitch_range:.6f} rad")
 
+        comparison["playing_pitch_range_rad"] = {
+            "extended_duration": val1_pitch_range,
+            "waist_hold": val2_pitch_range,
+        }
         if val2_pitch_range < val1_pitch_range * 0.5:
             print("\n✅ Validation 2 SUCCESS: Adding waist columns significantly reduced waist motion")
             print("   → Waist range reduced by >50%")
@@ -156,6 +166,7 @@ def compare_validations(val1_dir: Path, val2_dir: Path) -> None:
     print("Next Steps: Review full trace data and consult MC_ANIMATION_NEXT_VALIDATION.md")
     print("=" * 80)
     print()
+    return comparison
 
 
 def main():

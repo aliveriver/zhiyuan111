@@ -4,7 +4,7 @@ import io
 
 import pytest
 
-from x2_ps5_teleop.robot.mc_animation import ARM_NAMES, UPPER_NAMES, compile_animation, hold_animation
+from x2_ps5_teleop.robot.mc_animation import ARM_NAMES, UPPER_NAMES, WAIST_NAMES, compile_animation, hold_animation
 
 
 def frame(t_ms=0, delta=0.0):
@@ -48,6 +48,18 @@ def test_hold_is_constant_measured_pose_without_changing_recording():
     assert measured == before
 
 
+def test_waist_hold_is_opt_in_and_requires_all_three_channels():
+    a, b = frame(), frame(100)
+    a["waist"] = [{"name": name, "position": i * .01} for i, name in enumerate(WAIST_NAMES)]
+    b["waist"] = list(reversed(a["waist"]))
+    animation = compile_animation([a, b], include_waist=True)
+    rows = read_csv(animation)
+    assert {key for key in rows[0] if key.startswith("command_pos::waist")} == {
+        f"command_pos::{name}" for name in WAIST_NAMES}
+    with pytest.raises(ValueError):
+        compile_animation([a, {**b, "waist": a["waist"][:2]}], include_waist=True)
+
+
 @pytest.mark.parametrize("fault", ["name", "duplicate", "nan", "time", "empty_hand"])
 def test_rejects_ambiguous_or_invalid_motion(fault):
     a, b = frame(), frame(50)
@@ -88,6 +100,8 @@ def test_probe_changes_only_requested_joint_and_preserves_source():
     assert samples[-1]["arm"][4]["position"] == pytest.approx(-0.18)
     with pytest.raises(ValueError):
         single_joint_frames(measured, "left_wrist_yaw_joint", 0.2)
+    extended = single_joint_frames(measured, "left_wrist_yaw_joint", 0.02, 10000)
+    assert len(extended) == 201 and extended[-1]["t_ms"] == 10000
 
 
 def test_probe_default_does_not_upload_or_execute(tmp_path, monkeypatch):

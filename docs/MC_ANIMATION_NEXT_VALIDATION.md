@@ -134,3 +134,24 @@
 - `docs/MC_ANIMATION_COMMISSIONING.md`：完整现场验收流程。
 - `docs/X2_V0_9_7_CONTROL_INVESTIGATION.md`：v0.9.7 MC/HAL 调查证据。
 
+## 六、代码化执行方式
+
+探针现在支持两项考证的独立输出目录和参数，默认仍只生成本地证据：
+
+```bash
+# 考证一：至少 10 秒，仍只输出双臂和双手
+python3 -m x2_ps5_teleop.robot.mc_animation_probe \
+  --output /tmp/x2-animation-validation-1 \
+  --duration-ms 10000
+
+# 考证二：重新采集新鲜腰部目标，并在每帧加入 3 个恒定腰部列
+python3 -m x2_ps5_teleop.robot.mc_animation_probe \
+  --output /tmp/x2-animation-validation-2 \
+  --duration-ms 10000 --include-waist
+
+# 比较两个目录的 PRE_PLAYING/PLAYING/IDLE 腰部范围
+python3 scripts/analyze_validation_results.py \
+  /tmp/x2-animation-validation-1 /tmp/x2-animation-validation-2
+```
+
+若两项考证均未能让腰部保持不变，现场报告可明确声明 `waist_policy: "mc_balanced"`，并同时勾选 `waist_bounded`、填写 `waist_bound_rad`。回放门控仍要求完整停止、状态序列、腿部连续输出等证据；没有该现场报告时不会开放 App。

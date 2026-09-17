@@ -17,7 +17,7 @@ import time
 from typing import Any
 import uuid
 
-from .mc_animation import compile_animation, hold_animation, positions, finite
+from .mc_animation import all_positions, compile_animation, hold_animation, positions, finite
 
 BUSY = frozenset({'preparing', 'playing', 'pausing', 'paused', 'stopping', 'stop_failed'})
 LIBRARIES = {
@@ -30,6 +30,7 @@ CONFIG_FILES = tuple('/agibot/software/mc_param/robot/lx2501_3_t2d5/' + p for p 
     'mc.yaml', 'action_setting.yaml', 'classic/animation_player.yaml'))
 CHECKS = ('single_joint', 'hold_stop', 'pause_resume', 'repeat_playback',
           'disconnect_stop', 'legs_waist_unchanged', 'status_sequence', 'full_clip_025x')
+WAIST_POLICIES = frozenset({'unchanged', 'mc_balanced'})
 
 
 def load_profile(path: Path, *, commissioning_trial: bool = False) -> dict[str, Any]:
@@ -37,7 +38,13 @@ def load_profile(path: Path, *, commissioning_trial: bool = False) -> dict[str, 
     profile = json.loads(path.read_text())
     if profile.get('firmware') != 'Agi v0.9.7' or not profile.get('reviewed_by'):
         raise ValueError('MC 配置需要固件版本及现场验收人')
-    required = ('single_joint', 'hold_stop', 'legs_waist_unchanged', 'status_sequence') if commissioning_trial else CHECKS
+    waist_policy = profile.get('waist_policy', 'unchanged')
+    if waist_policy not in WAIST_POLICIES:
+        raise ValueError('waist_policy 必须为 unchanged 或 mc_balanced')
+    required = ('single_joint', 'hold_stop', 'status_sequence')
+    required += ('waist_bounded' if waist_policy == 'mc_balanced' else 'legs_waist_unchanged',)
+    if not commissioning_trial:
+        required = CHECKS if waist_policy == 'unchanged' else tuple(k for k in CHECKS if k != 'legs_waist_unchanged') + ('waist_bounded',)
     if any(profile.get('checks', {}).get(key) is not True for key in required):
         raise ValueError('MC 现场验收未完成；离线测试不能替代实机停止验证')
     report = path.parent / profile['report_file']
@@ -57,6 +64,10 @@ def load_profile(path: Path, *, commissioning_trial: bool = False) -> dict[str, 
         value = finite(profile.get(name))
         if not 0 < value <= maximum:
             raise ValueError(f'MC 验收参数 {name} 必须在 (0, {maximum}] 内')
+    if waist_policy == 'mc_balanced':
+        bound = finite(profile.get('waist_bound_rad'))
+        if not 0 < bound <= .5:
+            raise ValueError('mc_balanced 策略需要 0 < waist_bound_rad <= 0.5')
     host = profile.get('ssh_host', '')
     if not isinstance(host, str) or not re.fullmatch(r'[a-zA-Z0-9_.@:-]+', host) or host.startswith('-'):
         raise ValueError('MC 配置需要有效的 SSH 主机')
@@ -83,7 +94,8 @@ def remaining_frames(frames, progress_ms):
             first = copy.deepcopy(left)
             span = frame['t_ms'] - left['t_ms']
             ratio = max(0, (progress_ms - left['t_ms']) / span) if span else 0
-            left_positions, right_positions = positions(left), positions(frame)
+            include_waist = "waist" in left or "waist" in frame
+            left_positions, right_positions = all_positions(left, include_waist=include_waist), all_positions(frame, include_waist=include_waist)
             # Normalize arm order by name; hands remain their official slot order.
             for part in ('arm', 'left_hand', 'right_hand'):
                 for j, item in enumerate(first[part]):
@@ -92,6 +104,11 @@ def remaining_frames(frames, progress_ms):
                         item['position'] = left_positions[name] + ratio * (right_positions[name] - left_positions[name])
                     else:
                         item['position'] += ratio * (frame[part][j]['position'] - item['position'])
+            if include_waist:
+                waist = {item['name']: item for item in first['waist']}
+                for name in right_positions:
+                    if name in waist:
+                        waist[name]['position'] = left_positions[name] + ratio * (right_positions[name] - left_positions[name])
             first['t_ms'] = 0
             result = [first] + [{**copy.deepcopy(f), 't_ms': f['t_ms'] - progress_ms} for f in frames[index:]]
             break
@@ -110,6 +127,7 @@ class RosAnimationIO:
             self.probe.close()
             raise RuntimeError('安装的 MC 枚举与现场验收不一致')
         self.events = []
+        self.include_waist = False
         self.probe.mc_observer = self._observe
         self.directory = '/tmp/x2-mc-playback/' + uuid.uuid4().hex
 
@@ -164,7 +182,8 @@ class RosAnimationIO:
         if player != 'idle' and mc.motion_status.control_area.value != area:
             raise RuntimeError('MC 动画控制区域与已验收链路不一致')
         events, self.events = self.events, []
-        return {'player': player, 'frame': p.frame(), 'events': events}
+        frame = p.frame(include_waist=self.include_waist) if self.include_waist else p.frame()
+        return {'player': player, 'frame': frame, 'events': events}
 
     def play(self, path, interrupt=False):
         self.events.clear()
@@ -289,23 +308,38 @@ class MCPlayback:
             self.task = asyncio.create_task(self._retry_stop())
 
     async def _call(self, fn, *args):
-        future = asyncio.get_running_loop().run_in_executor(self.pool, fn, *args)
+        # Wrapping the concurrent future explicitly keeps completion wakeups
+        # reliable on Python 3.14 when no other asyncio task is runnable.
+        future = asyncio.wrap_future(self.pool.submit(fn, *args))
         try:
-            return await asyncio.shield(future)
+            while not future.done():
+                try:
+                    return await asyncio.wait_for(asyncio.shield(future), .05)
+                except asyncio.TimeoutError:
+                    continue
+            return future.result()
         except asyncio.CancelledError:
             # A thread/RPC cannot be cancelled. Finish it, then handle stop.
             self.intent = 'stop'
             self.state = 'stopping'
-            return await asyncio.shield(future)
+            while not future.done():
+                try:
+                    return await asyncio.wait_for(asyncio.shield(future), .05)
+                except asyncio.TimeoutError:
+                    continue
+            return future.result()
 
     async def _ensure_io(self):
         if self.io is None:
             self.io = await self._call(self.io_factory, self.profile)
 
     def _validate_motion(self, frames):
+        include_waist = "waist" in frames[0]
         previous = None
         for frame in frames:
-            values = positions(frame)
+            if ("waist" in frame) != include_waist:
+                raise ValueError('腰部通道必须在每一帧同时存在或同时缺失')
+            values = all_positions(frame, include_waist=include_waist)
             if any(abs(v) > 3.141593 for v in values.values()):
                 raise ValueError('关节位置超出导出边界 ±π；此边界不代表机械限位')
             if previous:
@@ -314,14 +348,16 @@ class MCPlayback:
                 if dt < 0 or (dt == 0 and delta) or (dt > 0 and delta / dt > self.profile['max_joint_speed_rad_s']):
                     raise ValueError('轨迹相邻采样速度超过已验收范围')
             previous = (frame['t_ms'], values)
-        return compile_animation(frames, self.speed)
+        return compile_animation(frames, self.speed, include_waist=include_waist)
 
     @staticmethod
     def _distance(first, second):
-        a, b = positions(first), positions(second)
+        include_waist = "waist" in first or "waist" in second
+        a, b = all_positions(first, include_waist=include_waist), all_positions(second, include_waist=include_waist)
         return max(abs(a[k] - b[k]) for k in a)
 
     async def _launch(self, frames):
+        self.io.include_waist = "waist" in frames[0]
         animation = await self._call(self._validate_motion, frames)
         if self.intent != 'play':
             return False
