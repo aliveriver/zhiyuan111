@@ -1,6 +1,6 @@
 # v0.9.7 MC 动画回放验收
 
-本轮目标是使用 `SetMcPresetMotion + ani_path` 接入现有轨迹。已确认自定义 CSV 加载和输出列选择，已完成独立 MC 后端、控制器、App 和离线模拟集成。**尚未完成运动验收，App 真机回放默认不可用；当前现场未就绪，本文所有 execute 命令均不得现在执行。**
+本轮目标是使用 `SetMcPresetMotion + ani_path` 接入现有轨迹。已确认自定义 CSV 加载和输出列选择，已完成独立 MC 后端、控制器、App 和离线模拟集成。按现场决定，X2 未提供 commissioning 文件时也允许进入明确标识的有人值守测试模式；这不代表以下运动验收已经完成。
 
 ## 已确认的固件行为
 
@@ -123,10 +123,15 @@ python3 -m x2_ps5_teleop.robot.mc_playback_trial \
 `--mode` 可选 `stop`、`pause-resume`、`disconnect`、`timeout`、`complete`；中途操作按观测到 playing 后 `--after` 秒触发。`disconnect` 和 `timeout` 使用真实 BridgeController 的租约撤销/看门狗路径、真实 MC 传输，控制适配器不发送其他机器人命令；这不等于测试了物理网络故障。每次输出独立的 `report.json`、`trace.json`、`preview.csv`，不会自动勾选任何验收项。暂停继续如果起点不匹配会拒绝，不允许放宽到不合理容差来让测试通过。重复播放需每次先用已确认操作恢复起点。完整轨迹用生产轨迹文件只读加载、`--mode complete`，速度固定 0.25x，报告限制仍生效。不能将包含多余模式/事件的旧轨迹当成上肢 CSV。
 
 4. 审阅试验的暂停继续、重复播放、断连处理及 0.25x 全轨迹证据后，才将相应 `pause_resume`、`repeat_playback`、`disconnect_stop`、`full_clip_025x` 置 true，并更新现场报告和哈希。仍须明确 PC2 崩溃/物理断网无法靠 PC2 看门狗停止 MC 的边界和现场处置。桥接实机启用后的第一次操作继续有人值守，核验真实 App/网络断连。
-5. 完整报告通过后，维护人员在 [部署手册](PC2_DEPLOYMENT.md) 的正常 X2 启动命令后增加 `--mc-commissioning-profile /home/run/.x2_ps5_teleop/mc-commissioning.json`。未提供配置时保持关闭；无 force 开关。当前阶段不创建通过的配置，也不重启桥接。
+5. 完整报告通过后，维护人员可在 [部署手册](PC2_DEPLOYMENT.md) 的正常 X2 启动命令后增加 `--mc-commissioning-profile /home/run/.x2_ps5_teleop/mc-commissioning.json`，从测试模式切换为带报告和远端哈希核对的已 commissioning 模式。
 
 参数都是验收上限，不是硬件规格：`max_speed ≤0.25`、`max_joint_speed_rad_s ≤0.4`、`max_clip_seconds ≤60`、`start_tolerance_rad ≤0.05`、`hold_tolerance_rad ≤0.03`、`stable_tolerance_rad ≤0.003`、`hold_snapshot_max_age_s ≤0.25`、`transition_timeout_s ≤10`。均须大于零，并依据实测选择更严格值。保持动画上传超过姿态有效期或偏差超限会进入 stop_failed，不会用陈旧姿态强制回拉；因此网络时延也必须验收。
 
 活动状态：preparing / playing / pausing / paused / stopping / stop_failed / completed / error。MC 过渡导致进度是估算；只有完整序列、末端反馈匹配才显示完成。停止必须观察替换序列、idle、位置接近保持目标，并连续 300 ms 稳定。服务返回成功不足以确认停止。停止失败不会自动重复发命令，需用户明确“重试停止”。即使清除软件急停锁存或重新连接，其他动作仍被互锁。
+
+使用 `scripts/analyze_validation_results.py` 生成的结构化指标只能辅助审阅原始
+`report.json`、`trace.json` 和 CSV。报告中的空值或 `evidence_available:false` 表示证据
+不足，不能按零变化处理。`waist_bound_rad` 应覆盖相对播放前新鲜初值的最大绝对偏移，
+不能只采用 PLAYING 阶段的峰峰值；还需由现场负责人结合机器人实际稳定性确认。
 
 `~/.x2_ps5_teleop/mc-motion-unconfirmed.lock` 表示上次执行没有可靠结束。禁止手工删除以解除动作互锁；保留证据，在现场值守下使用原报告配置重试停止。若状态/网络条件使软件无法确认，使用现场物理急停并继续诊断。正常关闭服务会等待停止处理，失败时以错误退出并保留文件；强杀或失联没有停止保证。

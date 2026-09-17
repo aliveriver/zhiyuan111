@@ -33,6 +33,30 @@ CHECKS = ('single_joint', 'hold_stop', 'pause_resume', 'repeat_playback',
 WAIST_POLICIES = frozenset({'unchanged', 'mc_balanced'})
 
 
+def runtime_test_profile() -> dict[str, Any]:
+    """Conservative limits for attended X2 testing without evidence gating."""
+    return {
+        'commissioned': False,
+        'ssh_host': 'run@10.0.1.40',
+        'waist_policy': 'mc_balanced',
+        'player_enum_values': {
+            'IDLE': 0, 'PRE_PLAYING': 1, 'PLAYING': 2, 'INTERRUPTING': 3, 'ERROR': 4,
+        },
+        # None selects legal runtime lifecycle validation instead of claiming
+        # an exact sequence was previously commissioned.
+        'play_sequence': None,
+        'hold_sequence': None,
+        'start_tolerance_rad': .01,
+        'hold_tolerance_rad': .01,
+        'stable_tolerance_rad': .002,
+        'hold_snapshot_max_age_s': .2,
+        'max_speed': .25,
+        'max_joint_speed_rad_s': .1,
+        'transition_timeout_s': 5,
+        'max_clip_seconds': 60,
+    }
+
+
 def load_profile(path: Path, *, commissioning_trial: bool = False) -> dict[str, Any]:
     """A reviewed field report is required; no --force/boolean enable switch."""
     profile = json.loads(path.read_text())
@@ -82,6 +106,7 @@ def load_profile(path: Path, *, commissioning_trial: bool = False) -> dict[str, 
                 or any(x not in ('idle', 'pre_playing', 'playing', 'interrupting') for x in seq)
                 or 'idle' in seq[:-1] or any(a == b for a, b in zip(seq, seq[1:]))):
             raise ValueError(f'{key} 必须填写实际观测的去重状态序列，以 idle 结束')
+    profile['commissioned'] = True
     return profile
 
 
@@ -152,14 +177,16 @@ class RosAnimationIO:
         import re
         if not re.fullmatch(r'[a-zA-Z0-9_.@:-]+', host) or host.startswith('-'):
             raise ValueError('SSH 主机格式无效')
-        expected = {p: self.profile['remote_sha256'][p] for p in (*LIBRARIES, *CONFIG_FILES)}
-        code = ('import hashlib,json; from pathlib import Path; '
-                f'print(json.dumps({{p:hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in {list(expected)!r}}}))')
-        result = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=2',
-                                 host, 'python3 -c ' + shlex.quote(code)],
-                                capture_output=True, check=True, timeout=4)
-        if json.loads(result.stdout) != expected:
-            raise RuntimeError('MC 实机库或配置已变化，必须重新验收')
+        hashes = self.profile.get('remote_sha256')
+        if hashes:
+            expected = {p: hashes[p] for p in (*LIBRARIES, *CONFIG_FILES)}
+            code = ('import hashlib,json; from pathlib import Path; '
+                    f'print(json.dumps({{p:hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in {list(expected)!r}}}))')
+            result = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=2',
+                                     host, 'python3 -c ' + shlex.quote(code)],
+                                    capture_output=True, check=True, timeout=4)
+            if json.loads(result.stdout) != expected:
+                raise RuntimeError('MC 实机库或配置已变化，必须重新验收')
         self.probe.require_standing()
 
     def upload(self, animation):
@@ -212,12 +239,25 @@ class ObservedSequence:
                 continue
             if self.seen and self.seen[-1] == player:
                 continue
+            if self.expected is None:
+                if player == 'idle':
+                    if 'playing' not in self.seen:
+                        raise RuntimeError('MC 未观察到 PLAYING 即回到 IDLE')
+                elif 'idle' in self.seen or player not in ('pre_playing', 'playing', 'interrupting'):
+                    raise RuntimeError('MC 状态生命周期非法')
+                if len(self.seen) >= 16:
+                    raise RuntimeError('MC 状态变化过多')
+                self.seen.append(player)
+                if player == 'playing' and self.playing_at is None:
+                    self.playing_at = event['at']
+                continue
             if len(self.seen) >= len(self.expected) or player != self.expected[len(self.seen)]:
                 raise RuntimeError('MC 状态序列与现场验收不符')
             self.seen.append(player)
             if player == 'playing' and self.playing_at is None:
                 self.playing_at = event['at']
-        return self.seen == self.expected
+        return (bool(self.seen) and self.seen[-1] == 'idle'
+                if self.expected is None else self.seen == self.expected)
 
 
 class MCPlayback:

@@ -411,8 +411,11 @@ class BridgeController:
                                     playback_progress_estimated=True,
                                     max_playback_speed=self.mc_playback.profile['max_speed'],
                                     waist_policy=self.mc_playback.profile.get('waist_policy', 'unchanged'),
-                                    reason=("MC 回放已配置现场验收报告；腰部按现场验收的 MC 平衡策略处理；"
-                                            "每次播放仍校验站立、版本与起点，进度为估算"))
+                                    commissioned=self.mc_playback.profile.get('commissioned', False),
+                                    reason=(("MC 回放已配置现场验收报告；"
+                                             if self.mc_playback.profile.get('commissioned') else
+                                             "MC 回放处于未校验 commissioning 文件的有人值守测试模式；")
+                                            + "腰部由 MC 平衡控制；每次播放仍校验站立、状态与起点，进度为估算"))
             return capabilities
         return {"backend": "custom", "hand_position": False,
                 "upper_body_playback": False, "teaching": False,

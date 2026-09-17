@@ -104,6 +104,27 @@ def test_probe_changes_only_requested_joint_and_preserves_source():
     assert len(extended) == 201 and extended[-1]["t_ms"] == 10000
 
 
+def test_probe_observation_requires_playing_then_idle():
+    from x2_ps5_teleop.robot.mc_animation_probe import observe_hold, observe_primary
+
+    class TraceProbe:
+        def __init__(self, states):
+            self.states = iter(states)
+            self.monotonic = 0.0
+        def wait(self, _seconds):
+            pass
+        def sample(self):
+            self.monotonic += 0.05
+            return {"monotonic": self.monotonic,
+                    "mc": {"player_state_name": next(self.states)}}
+
+    assert observe_primary(TraceProbe(["IDLE", "PRE_PLAYING", "PLAYING", "IDLE"]),
+                           3000, "complete", 2) == "complete"
+    result = observe_hold(TraceProbe(
+        ["PRE_PLAYING", "PLAYING", "IDLE", "IDLE", "IDLE", "IDLE", "IDLE", "IDLE", "IDLE", "IDLE"]))
+    assert result["hold_stable_observed_s"] >= 0.3
+
+
 def test_probe_default_does_not_upload_or_execute(tmp_path, monkeypatch):
     import json
     import sys

@@ -142,16 +142,25 @@
 # 考证一：至少 10 秒，仍只输出双臂和双手
 python3 -m x2_ps5_teleop.robot.mc_animation_probe \
   --output /tmp/x2-animation-validation-1 \
-  --duration-ms 10000
+  --duration-ms 10000 --stop-mode complete
 
 # 考证二：重新采集新鲜腰部目标，并在每帧加入 3 个恒定腰部列
 python3 -m x2_ps5_teleop.robot.mc_animation_probe \
   --output /tmp/x2-animation-validation-2 \
-  --duration-ms 10000 --include-waist
+  --duration-ms 10000 --include-waist \
+  --stop-mode midway --stop-after 5
 
 # 比较两个目录的 PRE_PLAYING/PLAYING/IDLE 腰部范围
 python3 scripts/analyze_validation_results.py \
-  /tmp/x2-animation-validation-1 /tmp/x2-animation-validation-2
+  /tmp/x2-animation-validation-1 /tmp/x2-animation-validation-2 \
+  --output /tmp/x2-animation-commissioning-analysis.json
 ```
+
+分析 JSON 同时列出 PLAYING 阶段手臂命令/反馈最大误差、保持动画回到
+`IDLE` 后至少 300 ms 的臂反馈与命令范围、腿部命令最大真实接收间隔及最大观测
+消息年龄、头部命令相对初值偏移、腰部命令相对初值最大绝对偏移。新探针会在每次
+采样间隔内累计 DDS 回调的最大消息间隔，避免用约 20 Hz 的 trace 采样周期冒充实际
+腿部消息周期。旧 trace 没有稳定窗口时间戳或接收间隔字段时，报告明确标记证据缺失，
+不会据此判定通过。该 JSON 只是人工审阅材料，不会生成或修改 commissioning 配置。
 
 若两项考证均未能让腰部保持不变，现场报告可明确声明 `waist_policy: "mc_balanced"`，并同时勾选 `waist_bounded`、填写 `waist_bound_rad`。回放门控仍要求完整停止、状态序列、腿部连续输出等证据；没有该现场报告时不会开放 App。

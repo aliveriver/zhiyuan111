@@ -18,6 +18,8 @@ import uuid
 
 from .mc_animation import ARM_NAMES, WAIST_NAMES, compile_animation, hold_animation, positions, waist_positions
 
+PLAYER_STATE_NAMES = {0: "IDLE", 1: "PRE_PLAYING", 2: "PLAYING", 3: "INTERRUPTING", 4: "ERROR"}
+
 
 class Probe:
     def __init__(self):
@@ -37,6 +39,7 @@ class Probe:
         self.executor.add_node(self.node)
         self.latest = {}
         self.received = {}
+        self.max_receive_intervals = {}
         self.counts = {}
         self.trace = []
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -51,11 +54,15 @@ class Probe:
             self.node.create_subscription(kind, topic, lambda msg, key=key: self.receive(key, msg), qos)
         self.system = self.node.create_client(GetSystemState, "/aimdk_5Fmsgs/srv/GetSystemState")
         self.motion = self.node.create_client(SetMcPresetMotion, "/aimdk_5Fmsgs/srv/SetMcPresetMotion")
-        self._player_state_names = {0: "IDLE", 1: "PRE_PLAYING", 2: "PLAYING", 3: "INTERRUPTING", 4: "ERROR"}
 
     def receive(self, key, msg):
+        received_at = time.monotonic()
+        previous = self.received.get(key)
+        if previous is not None:
+            self.max_receive_intervals[key] = max(
+                self.max_receive_intervals.get(key, 0.0), received_at - previous)
         self.latest[key] = msg
-        self.received[key] = time.monotonic()
+        self.received[key] = received_at
         self.counts[key] = self.counts.get(key, 0) + 1
         if key == "mc" and getattr(self, "mc_observer", None):
             self.mc_observer(msg)
@@ -71,11 +78,12 @@ class Probe:
             msg = self.latest.get(key)
             row[key] = {j.name: float(j.position) for j in msg.joints} if msg else {}
             row[key + "_age"] = row["monotonic"] - self.received.get(key, 0)
+            row[key + "_max_interval"] = self.max_receive_intervals.pop(key, 0.0)
         mc = self.latest.get('mc')
         row['mc'] = ({'action': mc.action_info.action_desc,
                       'action_status': mc.action_info.status.value,
                       'player_state': mc.motion_status.player_state.value,
-                      'player_state_name': self._player_state_names.get(mc.motion_status.player_state.value, 'UNKNOWN'),
+                      'player_state_name': PLAYER_STATE_NAMES.get(mc.motion_status.player_state.value, 'UNKNOWN'),
                       'control_area': mc.motion_status.control_area.value} if mc else None)
         row['mc_age'] = row['monotonic'] - self.received.get('mc', 0)
         hand = self.latest.get('hand')
@@ -202,6 +210,51 @@ def single_joint_frames(measured, joint, delta, duration_ms=3000):
     return frames
 
 
+def observe_primary(probe, duration_ms, stop_mode, stop_after_s):
+    """Sample until complete playback or the requested mid-playback stop point."""
+    deadline = time.monotonic() + duration_ms / 1000 + 15
+    playing_since = None
+    while time.monotonic() < deadline:
+        probe.wait(0.05)
+        row = probe.sample()
+        state = (row.get("mc") or {}).get("player_state_name")
+        if state in ("ERROR", "UNKNOWN"):
+            raise RuntimeError(f"MC 动画状态异常：{state}")
+        if state == "PLAYING":
+            if playing_since is None:
+                playing_since = time.monotonic()
+            if stop_mode == "midway" and time.monotonic() - playing_since >= stop_after_s:
+                return "midway"
+        elif stop_mode == "complete" and playing_since is not None and state == "IDLE":
+            return "complete"
+    raise RuntimeError(f"未观察到主动画按 {stop_mode} 模式到达预期状态；请使用物理急停")
+
+
+def observe_hold(probe, timeout_s=10, stable_s=0.3):
+    """Require replacement activity, IDLE, then an uninterrupted stable window."""
+    deadline = time.monotonic() + timeout_s
+    active = False
+    idle_at = None
+    while time.monotonic() < deadline:
+        probe.wait(0.05)
+        row = probe.sample()
+        state = (row.get("mc") or {}).get("player_state_name")
+        if state in ("PRE_PLAYING", "PLAYING", "INTERRUPTING"):
+            if idle_at is not None:
+                raise RuntimeError("保持动画回到 IDLE 后再次活动；请使用物理急停")
+            active = True
+        elif state == "IDLE" and active:
+            if idle_at is None:
+                idle_at = row["monotonic"]
+            if row["monotonic"] - idle_at >= stable_s:
+                return {"hold_idle_observed_at": idle_at,
+                        "hold_stable_observed_until": row["monotonic"],
+                        "hold_stable_observed_s": row["monotonic"] - idle_at}
+        elif state in ("ERROR", "UNKNOWN"):
+            raise RuntimeError(f"保持动画状态异常：{state}")
+    raise RuntimeError("保持替换未观察到活动、IDLE 及 300 ms 稳定窗口；请使用物理急停")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True, help="新建的诊断目录，不使用轨迹数据目录")
@@ -211,12 +264,20 @@ def main():
                         help="单关节轨迹时长，3000～60000 ms；考证一建议至少 10000")
     parser.add_argument("--include-waist", action="store_true",
                         help="考证二：加入新鲜恒定腰部目标列")
+    parser.add_argument("--stop-mode", choices=("complete", "midway"), default="midway",
+                        help="complete 完整播放后测试保持；midway 在 PLAYING 中途停止")
+    parser.add_argument("--stop-after", type=float, default=2,
+                        help="midway 模式进入 PLAYING 后等待秒数，范围 0.5～10")
     parser.add_argument("--ssh-host", default="run@10.0.1.40")
     parser.add_argument("--ssh-control-path")
     parser.add_argument("--execute", action="store_true", help="实际发出单关节动画及静止替换请求")
     parser.add_argument("--attended-estop", action="store_true")
     parser.add_argument("--unloaded", action="store_true")
     args = parser.parse_args()
+    if not 0.5 <= args.stop_after <= 10:
+        parser.error("--stop-after 必须在 0.5～10 秒内")
+    if args.stop_mode == "midway" and args.stop_after >= args.duration_ms / 1000:
+        parser.error("midway 的 --stop-after 必须短于动画时长")
     if args.execute and not (args.attended_estop and args.unloaded):
         parser.error("实机测试必须确认物理急停有人值守且机器人空载")
     args.output.mkdir(parents=True, exist_ok=False)
@@ -237,6 +298,8 @@ def main():
                       include_waist=args.include_waist,
                       waist_channels=list(WAIST_NAMES) if args.include_waist else [],
                       scheme="waist_hold" if args.include_waist else "extended_duration",
+                      stop_mode=args.stop_mode, stop_after_s=args.stop_after,
+                      csv_columns=animation.content.decode("ascii").splitlines()[0].split(","),
                       csv_sha256=animation.sha256, source_rate_hz=20, csv_tick_ms=2,
                       csv_rows=animation.rows)
         if not args.execute:
@@ -257,13 +320,22 @@ def main():
         current = positions(current_frame)
         if max(abs(current[name] - value) for name, value in positions(measured).items()) > 0.01:
             raise RuntimeError("准备期间姿态发生变化，拒绝执行")
+        baseline = probe.sample()
+        stale_commands = [key for key in ("arm_command", "leg_command", "waist_command", "head_command")
+                          if not baseline.get(key) or baseline.get(key + "_age", 1.0) > 0.25]
+        if stale_commands:
+            raise RuntimeError(f"播放前命令基线缺失或超过 250 ms：{', '.join(stale_commands)}")
+        if (baseline.get("mc") or {}).get("player_state_name") != "IDLE":
+            raise RuntimeError("记录播放前基线时 MC 已非 IDLE")
+        report["baseline_sample_at"] = baseline["monotonic"]
         attempted = True  # Includes timeout: MC may already have accepted it.
         report["start_response"] = probe.play(remote + "/probe.csv")
         report["executed"] = True
-        for _ in range(40):
-            probe.wait(0.05)
-            probe.sample()
-        # Mid-playback stop candidate: interrupt with freshly measured pose.
+        report["primary_observation"] = observe_primary(
+            probe, args.duration_ms, args.stop_mode, args.stop_after)
+        report["primary_observed_at"] = time.monotonic()
+        # Replacement uses a freshly measured pose after either completion or
+        # the explicitly requested mid-playback point.
         frozen = probe.frame(include_waist=args.include_waist) if args.include_waist else probe.frame()
         hold = hold_animation(frozen)
         (args.output / "hold.csv").write_bytes(hold.content)
@@ -271,9 +343,7 @@ def main():
         upload(hold.content, args.ssh_host, args.ssh_control_path, remote + "/hold.csv")
         report["hold_response"] = probe.play(remote + "/hold.csv", interrupt=True)
         hold_sent = True
-        for _ in range(40):
-            probe.wait(0.05)
-            probe.sample()
+        report.update(observe_hold(probe))
         report["final"] = probe.inspect()
         # No automatic unlock: command/feedback traces need review, including
         # body output isolation and stop latency, before full replay is enabled.

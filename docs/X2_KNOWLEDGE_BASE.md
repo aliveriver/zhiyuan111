@@ -164,7 +164,7 @@ timeMS, command_pos::<14 arm names>, command_pos::<20 hand names>
 3. 左腕 yaw 最多 0.02 rad、约 3 秒单关节测试。
 4. 中途请求保持停止，检查 MC 状态序列、停止延迟、臂反馈和腿/腰/头输出。
 5. 通过后再验证暂停/继续、断连、超时、重复播放和 0.25x 全轨迹。
-6. 验收人审阅报告和哈希，才填写 `mc-commissioning.json` 并让正常桥接加载。
+6. 验收人审阅报告和哈希后填写 `mc-commissioning.json`，让正常桥接从有人值守测试模式切换为带报告核对的模式。
 
 验收配置要求固件、验收人、报告 SHA-256、MC/配置文件 SHA-256、枚举值、真实状态序列和限制参数。模板位于 `docs/mc_commissioning.example.json`，所有检查默认关闭。不能把离线测试结果填成现场通过。
 

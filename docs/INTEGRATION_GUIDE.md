@@ -27,10 +27,10 @@ PC1/soc0 10.0.1.40
 | 底盘速度和模式 | 可用 | 已恢复，需现场状态正常 |
 | 灵巧手五参数/位置目标 | 模拟 | 已恢复，仍需观察 MC 仲裁 |
 | 双臂 14 + 双手 20 状态录制 | 模拟反馈 | 只读采集，不卸力 |
-| MC 上肢 CSV 回放 | 模拟 | 默认关闭，必须加载完整现场验收报告 |
+| MC 上肢 CSV 回放 | 模拟 | 开放；无报告时为有人值守测试模式 |
 | 卸力拖动示教 | 不提供 | 未确认，不提供 |
 
-启动 X2 时省略 `--mc-commissioning-profile`，上肢回放保持关闭；不能通过改状态名、移除 `_require_develop_mc()` 或增加 force 开关绕过门槛。
+启动 X2 时可以省略 `--mc-commissioning-profile`，此时上肢回放采用保守限制并在 App 显示未 commissioning 警告。运行时站立、MC 空闲、起点、速度和停止反馈保护不因省略报告而关闭。
 
 ## 2. 代码结构
 
@@ -202,7 +202,7 @@ export LD_PRELOAD="/agibot/software/common/lib/libaimdk_msgs__rosidl_generator_p
   --source mobile_app --config /home/run/zhiyuan111/config/controller.json
 ```
 
-真机回放只有在现场验收完整、配置放在 `/home/run/.x2_ps5_teleop/mc-commissioning.json` 后，才在命令末尾增加：
+现场验收完整且配置放在 `/home/run/.x2_ps5_teleop/mc-commissioning.json` 后，可在命令末尾增加以下可选参数，启用报告和远端哈希核对：
 
 ```text
 --mc-commissioning-profile /home/run/.x2_ps5_teleop/mc-commissioning.json

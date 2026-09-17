@@ -11,7 +11,8 @@ import pytest
 
 from x2_ps5_teleop.robot.mc_animation import ARM_NAMES, positions
 from x2_ps5_teleop.robot.mc_playback import (
-    CHECKS, CONFIG_FILES, LIBRARIES, MCPlayback, load_profile, remaining_frames,
+    CHECKS, CONFIG_FILES, LIBRARIES, MCPlayback, ObservedSequence, load_profile,
+    remaining_frames, runtime_test_profile,
 )
 from x2_ps5_teleop.bridge.controller import BridgeController, BridgeError
 from x2_ps5_teleop.robot.motion import MockRobot
@@ -31,6 +32,28 @@ def profile():
                 hold_snapshot_max_age_s=.25, max_joint_speed_rad_s=.4,
                 transition_timeout_s=.15, play_sequence=['playing', 'idle'],
                 hold_sequence=['playing', 'idle'])
+
+
+def test_runtime_test_profile_opens_conservative_uncommissioned_backend():
+    runtime = runtime_test_profile()
+    assert runtime['commissioned'] is False
+    assert runtime['max_speed'] == .25
+    assert runtime['max_joint_speed_rad_s'] == .1
+    assert runtime['waist_policy'] == 'mc_balanced'
+    assert runtime['play_sequence'] is None and runtime['hold_sequence'] is None
+
+    sequence = ObservedSequence(None)
+    assert not sequence.update({'player': 'idle', 'events': []})
+    assert not sequence.update({'player': 'pre_playing', 'events': []})
+    assert not sequence.update({'player': 'playing', 'events': []})
+    assert sequence.update({'player': 'idle', 'events': []})
+
+    with pytest.raises(RuntimeError, match='PLAYING'):
+        ObservedSequence(None).update({
+            'player': 'idle',
+            'events': [{'player': 'pre_playing', 'at': time.monotonic()},
+                       {'player': 'idle', 'at': time.monotonic()}],
+        })
 
 
 class SimIO:
@@ -413,21 +436,26 @@ def test_paused_feedback_loss_persists_interlock_and_close_reports_failure(tmp_p
     asyncio.run(run())
 
 
-def test_server_rejects_incomplete_commissioning_before_constructing_robot(tmp_path, monkeypatch):
-    from argparse import Namespace
+def test_server_uses_runtime_profile_without_commissioning_and_preserves_interlock(tmp_path):
     from x2_ps5_teleop.bridge import server
-    def forbidden(**kwargs):
-        pytest.fail('invalid commissioning must not construct the real robot backend')
-    monkeypatch.setattr(server, 'X2RosRobot', forbidden)
     path = tmp_path / 'profile.json'
     path.write_text('{}')
-    args = Namespace(mc_commissioning_profile=path, robot='x2', data_dir=tmp_path)
     with pytest.raises(ValueError):
-        asyncio.run(server.serve(args))
-    args.mc_commissioning_profile = None
-    (tmp_path / 'mc-motion-unconfirmed.lock').touch()
-    with pytest.raises(RuntimeError, match='停止未确认'):
-        asyncio.run(server.serve(args))
+        server.resolve_playback_profile('x2', path)
+
+    runtime = server.resolve_playback_profile('x2', None)
+    assert runtime is not None and runtime['commissioned'] is False
+    with pytest.raises(ValueError, match='Mock'):
+        server.resolve_playback_profile('mock', path)
+
+    interlock = tmp_path / 'mc-motion-unconfirmed.lock'
+    interlock.touch()
+    playback = MCPlayback(runtime, lambda _: SimIO(), interlock_path=interlock)
+    assert playback.state == 'stop_failed'
+    assert playback.busy
+    assert interlock.exists()
+    asyncio.run(playback.close())
+    assert not interlock.exists()
 
 
 def test_trial_default_only_generates_local_preview(tmp_path, monkeypatch):

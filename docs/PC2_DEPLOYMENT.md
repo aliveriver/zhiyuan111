@@ -2,7 +2,7 @@
 
 适用主机：PC2 `10.0.1.41`，用户 `run`，项目 `/home/run/zhiyuan111`。本方案不升级固件、不修改 PC1 的 MC/HAL/状态机配置，也不部署独立 OmniHand 驱动。
 
-当前功能及限制见 [App 手册](APP_USER_GUIDE.md)，接口证据见 [调查报告](X2_V0_9_7_CONTROL_INVESTIGATION.md)。部署本版本恢复真机手部五参数和位置预设执行；支持现有人工移动、状态采样与轨迹管理，独立 MC 回放已接入但默认关闭，需完整现场验收配置。启动 X2 后端会注册 MC 输入源，不是纯只读诊断。
+当前功能及限制见 [App 手册](APP_USER_GUIDE.md)，接口证据见 [调查报告](X2_V0_9_7_CONTROL_INVESTIGATION.md)。部署本版本恢复真机手部五参数和位置预设执行；支持现有人工移动、状态采样、轨迹管理和独立 MC 回放。未提供 commissioning 文件时以保守限制进入醒目的有人值守测试模式；启动 X2 后端会注册 MC 输入源，不是纯只读诊断。
 
 ## 1. 备份及运行进程边界
 
@@ -108,7 +108,7 @@ export LD_PRELOAD="/agibot/software/common/lib/libaimdk_msgs__rosidl_generator_p
 
 `common` 的完整 `aimdk_msgs` 必须优先，不能被 `ec` 的同名精简包遮蔽。保留前台终端观察日志。首次部署不配置开机自动启动或无人值守自动重启。
 
-启动成功应看到 WebSocket 监听日志及正确的源码路径。App 连接后应显示：已恢复灵巧手参数与位置控制，机械臂控制权及动画停止链路尚未确认。手部按钮解锁后可用，上肢回放不可用。
+启动成功应看到 WebSocket 监听日志及正确的源码路径。App 连接后应显示“未校验 commissioning 文件的有人值守测试模式”，轨迹回放可用但仍要求 TELEOP、稳定站立、MC 空闲和匹配的起始姿态。
 
 ## 6. 启动手机 App
 
@@ -133,7 +133,7 @@ npm start
 2. 连接 X2，确认后端说明不是 Mock。
 3. 先读取当前双手位置；没有反馈时不要点击任何状态迁移或电机上下电操作。
 4. 在现场受控条件下，20 Hz 录制短时静止状态，停止保存，检查臂 14 / 左手 10 / 右手 10。此步骤只验证采集，不证明动作回放。
-5. 确认手部参数按钮在 TELEOP 且无播放活动时可用。由现场人员使用已验证参数进行所选手的空载小幅测试，检查另一只手不变；读取反馈，保存位置预设，再验证原始符号回放。轨迹播放按钮仍不可用。
+5. 确认手部参数按钮在 TELEOP 且无播放活动时可用。由现场人员使用已验证参数进行所选手的空载小幅测试，检查另一只手不变；读取反馈，保存位置预设，再验证原始符号回放。轨迹播放只在空载、物理急停有人值守时测试。
 6. 核对退出 TELEOP、断连及心跳超时后的日志和零速请求。软件零速不等于物理急停，不能据此宣称机械臂安全停止已验收。
 
 完整颁奖验收按 [MC 验收说明](MC_ANIMATION_COMMISSIONING.md) 分阶段进行：单关节空载 ≤0.02 rad / 3 秒、中途停止、暂停继续与断连，再做 0.25x 全轨迹测试。当前不要执行 `aima em stop-app mc`、`MigrateSystemState`、`SetDcuMotorPowerState` 或直接向 HAL 手臂话题发布来绕过限制。
@@ -159,9 +159,9 @@ npm start
 | `Develop_MC` 报错 | 旧 App 正在请求卸力示教，更新 App 并使用状态录制；不要迁移系统状态 |
 
 
-## 9. 验收后启用 MC 回放
+## 9. 可选的 commissioning 文件
 
-新参数 `--mc-commissioning-profile <JSON路径>` 仅用于**已完成现场验收**的报告。模板及字段见 [验收说明](MC_ANIMATION_COMMISSIONING.md)，不要将模板 false 批量改成 true；初步验收使用专门 trial，不提前开放正常 App。
+参数 `--mc-commissioning-profile <JSON路径>` 用于加载已完成现场验收的报告。模板及字段见 [验收说明](MC_ANIMATION_COMMISSIONING.md)，不要将模板 false 批量改成 true。省略该参数不再关闭回放，而是进入保守限速、无远端文件哈希校验的有人值守测试模式，App 会持续显示警告。
 
 准备好的报告放在 `/home/run/.x2_ps5_teleop/mc-commissioning.json`，报告正文可与其同目录。PC2→soc0 需要已核对的主机密钥及可用 SSH 密钥认证，BatchMode 上传不交互询问密码。每次开始/继续会重新核对 soc0 库与配置哈希、Business / STAND_DEFAULT / RUNNING / IDLE、反馈新鲜度与起点；不匹配即拒绝。
 
@@ -171,4 +171,4 @@ npm start
 --mc-commissioning-profile /home/run/.x2_ps5_teleop/mc-commissioning.json
 ```
 
-不提供参数时真机回放仍关闭，现有轨迹管理和手部控制保持可用。该配置不改动轨迹数据，不升级固件，不取消 `_require_develop_mc()`。App 会显示报告限定的最高速度和估算进度。遇到 stop_failed 时持续互锁；停止未确认文件不能手工删除绕过。当前同步不部署通过的验收报告、不自动重启桥接。
+提供配置时 App 会标记为已 commissioning，并增加远端库和配置哈希核对。不提供参数时仍保留站立、MC 空闲、起点、限速、保持停止反馈、300 ms 稳定性和锁文件保护。遇到 stop_failed 时持续互锁；停止未确认文件不能手工删除绕过。

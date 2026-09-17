@@ -15,6 +15,7 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import Slider from '@react-native-community/slider';
+import { isPlaybackBusy, playbackAfterDisconnect, PlaybackState } from './playbackState';
 
 // Official HAL active-axis order, also present in v0.9.7 animation_player.yaml.
 const HAND_JOINTS = [
@@ -30,7 +31,7 @@ const HAND_JOINTS = [
   ['pinky_pip_joint', '小指 · 屈伸'],
 ] as const;
 
-type ControlCapabilities = { backend: string; hand_position: boolean; upper_body_playback: boolean; teaching: boolean; reason: string; playback_backend?: string; playback_progress_estimated?: boolean; max_playback_speed?: number };
+type ControlCapabilities = { backend: string; hand_position: boolean; upper_body_playback: boolean; teaching: boolean; reason: string; playback_backend?: string; playback_progress_estimated?: boolean; max_playback_speed?: number; commissioned?: boolean };
 type HandPose = { name: string; side: 'left' | 'right'; positions: number[]; requires_confirmation: boolean };
 type HandField = 'position' | 'velocity' | 'acceleration' | 'deceleration' | 'effort';
 const HAND_FIELDS: Array<{ key: HandField; label: string; min: number; max: number }> = [
@@ -53,7 +54,7 @@ type BridgeState = {
   recording_name: string | null;
   recording_frames: number;
   recording_sample_rate_hz: number | null;
-  playback_state: 'idle' | 'preparing' | 'playing' | 'pausing' | 'paused' | 'stopping' | 'stop_failed' | 'completed' | 'error';
+  playback_state: PlaybackState;
   playback_name: string | null;
   playback_progress_ms: number;
   playback_duration_ms: number;
@@ -61,6 +62,17 @@ type BridgeState = {
   control_capabilities?: ControlCapabilities;
   recording_error?: string | null;
   last_hand_command?: string | null;
+};
+const disconnectedState = (current: BridgeState): BridgeState => {
+  const playback = playbackAfterDisconnect(current.playback_state, current.playback_error);
+  return {
+    ...current,
+    armed: false,
+    robot_connected: false,
+    playback_state: playback.state,
+    playback_error: playback.error,
+    control_capabilities: undefined,
+  };
 };
 type JoystickValue = { x: number; y: number };
 type TrajectoryInfo = { name: string; frames: number; duration_ms: number; arm_joints: number; left_hand_joints: number; right_hand_joints: number };
@@ -217,6 +229,7 @@ export default function App() {
   const [sampleRate, setSampleRate] = useState('20');
   const [playbackSpeed, setPlaybackSpeed] = useState('0.25');
   const [selectedTrajectory, setSelectedTrajectory] = useState('');
+  const [editingTrajectory, setEditingTrajectory] = useState('');
   const [renameDraft, setRenameDraft] = useState('');
   const recording = bridgeState.recording_name !== null;
   const socketRef = useRef<WebSocket | null>(null);
@@ -226,10 +239,12 @@ export default function App() {
   const connectedRef = useRef(false);
   const armedRef = useRef(false);
   const lastHeartbeatRef = useRef(0);
+  const playbackStateRef = useRef<BridgeState['playback_state']>('idle');
   const motionRef = useRef<Motion>({ forward: 0, lateral: 0, angular: 0 });
 
   useEffect(() => {
-    if (bridgeState.recording_name !== null || ['preparing', 'playing', 'pausing', 'paused', 'stopping', 'stop_failed'].includes(bridgeState.playback_state)) {
+    playbackStateRef.current = bridgeState.playback_state;
+    if (bridgeState.recording_name !== null || isPlaybackBusy(bridgeState.playback_state)) {
       leftStickRef.current = { x: 0, y: 0 };
       rightStickRef.current = { x: 0, y: 0 };
       motionRef.current = { forward: 0, lateral: 0, angular: 0 };
@@ -271,8 +286,9 @@ export default function App() {
     } else {
       socket?.close();
     }
-    setBridgeState((current) => ({ ...current, armed: false, robot_connected: false, control_capabilities: undefined }));
-    if (notify) setStatusText('已断开');
+    const playbackWasActive = isPlaybackBusy(playbackStateRef.current);
+    setBridgeState(disconnectedState);
+    if (notify) setStatusText(playbackWasActive ? '连接断开，MC 停止未确认' : '已断开');
   }, []);
 
   const connect = useCallback(() => {
@@ -365,8 +381,9 @@ export default function App() {
         socketRef.current = null;
         connectedRef.current = false;
         armedRef.current = false;
-        setBridgeState((current) => ({ ...current, armed: false, robot_connected: false, control_capabilities: undefined }));
-        setStatusText('连接已断开');
+        const playbackWasActive = isPlaybackBusy(playbackStateRef.current);
+        setBridgeState(disconnectedState);
+        setStatusText(playbackWasActive ? '连接断开，MC 停止未确认' : '连接已断开');
       };
     } catch {
       setStatusText('无法创建 WebSocket');
@@ -493,14 +510,18 @@ export default function App() {
     Alert.alert('删除轨迹', `确定删除“${name}”吗？此操作无法撤销。`, [
       { text: '取消', style: 'cancel' },
       { text: '删除', style: 'destructive', onPress: () => {
-        if (send({ type: 'trajectory_delete', name }) && selectedTrajectory === name) setSelectedTrajectory('');
+        if (send({ type: 'trajectory_delete', name })) {
+          if (selectedTrajectory === name) setSelectedTrajectory('');
+          if (editingTrajectory === name) setEditingTrajectory('');
+        }
       } },
     ]);
   };
   const renameTrajectory = (name: string) => {
     const next = renameDraft.trim();
     if (next && next !== name && send({ type: 'trajectory_rename', old_name: name, new_name: next })) {
-      setSelectedTrajectory(next);
+      if (selectedTrajectory === name) setSelectedTrajectory(next);
+      setEditingTrajectory('');
       setRenameDraft('');
       refreshTrajectories();
     }
@@ -517,7 +538,10 @@ export default function App() {
   const playbackPercent = bridgeState.playback_duration_ms > 0
     ? Math.min(100, Math.round(bridgeState.playback_progress_ms * 100 / bridgeState.playback_duration_ms))
     : 0;
-  const playbackActive = ['preparing', 'playing', 'pausing', 'paused', 'stopping', 'stop_failed'].includes(bridgeState.playback_state);
+  const playbackActive = isPlaybackBusy(bridgeState.playback_state);
+  const selectedInfo = trajectories.find((trajectory) => trajectory.name === selectedTrajectory);
+  const canStartPlayback = bridgeState.robot_connected && bridgeState.armed && canPlay
+    && !!selectedInfo && !playbackActive && !recording;
   const playbackLabels: Record<BridgeState['playback_state'], string> = {
     idle: '当前空闲', preparing: '准备中：校验、上传或等待 MC 启动', playing: '正在播放',
     pausing: '暂停中：等待停止反馈', paused: '已暂停并确认保持', stopping: '停止中：等待反馈',
@@ -647,9 +671,12 @@ export default function App() {
             <Pressable style={styles.connectButton} onPress={refreshTrajectories}><Text style={styles.connectText}>刷新列表</Text></Pressable>
           </View>
           <View style={styles.trajectoryActions}>
+            <Pressable disabled={!canStartPlayback} style={[styles.recordButton, !canStartPlayback && styles.disabledButton]} onPress={() => selectedInfo && playTrajectory(selectedInfo.name)}><Text style={styles.armText}>{selectedInfo ? `播放：${selectedInfo.name}` : '请先选择轨迹'}</Text></Pressable>
+          </View>
+          <View style={styles.trajectoryActions}>
             <Pressable style={[styles.smallButton, bridgeState.playback_state !== 'playing' && styles.disabledButton]} disabled={bridgeState.playback_state !== 'playing'} onPress={() => controlPlayback('pause')}><Text style={styles.smallButtonText}>暂停</Text></Pressable>
             <Pressable style={[styles.smallButton, bridgeState.playback_state !== 'paused' && styles.disabledButton]} disabled={bridgeState.playback_state !== 'paused'} onPress={() => controlPlayback('resume')}><Text style={styles.smallButtonText}>继续</Text></Pressable>
-            <Pressable style={styles.deleteButton} onPress={() => controlPlayback('stop')}><Text style={styles.smallButtonText}>{bridgeState.playback_state === 'stop_failed' ? '重试停止' : '停止'}</Text></Pressable>
+            <Pressable disabled={!playbackActive || !bridgeState.robot_connected} style={[styles.deleteButton, (!playbackActive || !bridgeState.robot_connected) && styles.disabledButton]} onPress={() => controlPlayback('stop')}><Text style={styles.smallButtonText}>{bridgeState.playback_state === 'stop_failed' ? '重试停止' : '停止'}</Text></Pressable>
           </View>
           <View style={styles.activityPanel}>
             <Text style={styles.activityTitle}>{recording ? `● 正在录制：${bridgeState.recording_name}` : `${playbackLabels[bridgeState.playback_state]} ${bridgeState.playback_name || ''}`}</Text>
@@ -658,15 +685,17 @@ export default function App() {
             <View style={styles.progressTrack}><View style={[styles.progressValue, { width: `${recording ? 100 : playbackPercent}%` }]} /></View>
           </View>
           {bridgeState.recording_error ? <Text style={styles.handHint}>{bridgeState.recording_error}</Text> : null}
+          {!canPlay ? <Text style={styles.playbackUnavailable}>真机回放未开放：{bridgeState.control_capabilities?.reason || '尚未加载完整现场验收配置'}</Text> : !bridgeState.armed ? <Text style={styles.handHint}>进入 TELEOP 后才可播放所选轨迹。</Text> : null}
+          {canPlay && bridgeState.control_capabilities?.commissioned === false ? <Text style={styles.playbackUnavailable}>现场测试模式：未校验 commissioning 报告。仅限空载、物理急停有人值守时使用。</Text> : null}
           <Text style={styles.sectionLabel}>颁奖动作预设</Text>
           <View style={styles.awardGrid}>{AWARD_PRESETS.map(([name, label]) => { const exists = trajectories.some((item) => item.name === name); const carry = name === '单手携带'; const disabled = carry ? playbackActive || recording : !canPlay || !exists || playbackActive || recording; return <Pressable key={name} disabled={disabled} style={[styles.awardButton, disabled && styles.disabledButton]} onPress={() => carry ? setPage('move') : playTrajectory(name)}><Text style={styles.modeText}>{carry ? '单手携带 · 人工行走' : label}{!carry && !exists ? ' · 未录制' : ''}</Text></Pressable>; })}</View>
           <Text style={styles.handHint}>{recording ? '只采集上肢和双手实际反馈，不改变电机状态。用官方支持的工具制作动作，不强掰关节。' : '同名轨迹不会再覆盖；每条轨迹可独立播放、改名和删除。'}</Text>
-          {trajectories.length === 0 ? <Text style={styles.emptyText}>暂无轨迹</Text> : trajectories.map((trajectory) => <View key={trajectory.name} style={styles.trajectoryRow}>
+          {trajectories.length === 0 ? <Text style={styles.emptyText}>暂无轨迹</Text> : trajectories.map((trajectory) => <View key={trajectory.name} style={[styles.trajectoryRow, selectedTrajectory === trajectory.name && styles.trajectoryRowSelected]}>
             <View style={styles.trajectoryMeta}><Text style={styles.trajectoryTitle}>{trajectory.name}</Text><Text style={styles.fieldHint}>{trajectory.frames} 帧 · {(trajectory.duration_ms / 1000).toFixed(1)} 秒 · 臂 {trajectory.arm_joints} / 左手 {trajectory.left_hand_joints} / 右手 {trajectory.right_hand_joints}</Text></View>
-            <Pressable disabled={!canPlay || playbackActive || recording} style={[styles.smallButton, (!canPlay || playbackActive || recording) && styles.disabledButton]} onPress={() => playTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>{bridgeState.playback_name === trajectory.name && bridgeState.playback_state === 'playing' ? '播放中' : bridgeState.playback_name === trajectory.name && bridgeState.playback_state === 'paused' ? '已暂停' : '播放'}</Text></Pressable>
-            <Pressable disabled={playbackActive || recording} style={[styles.smallButton, (playbackActive || recording) && styles.disabledButton]} onPress={() => { setSelectedTrajectory(trajectory.name); setRenameDraft(trajectory.name); }}><Text style={styles.smallButtonText}>改名</Text></Pressable>
+            <Pressable disabled={playbackActive || recording} style={[styles.smallButton, (playbackActive || recording) && styles.disabledButton]} onPress={() => setSelectedTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>{selectedTrajectory === trajectory.name ? '已选择' : '选择'}</Text></Pressable>
+            <Pressable disabled={playbackActive || recording} style={[styles.smallButton, (playbackActive || recording) && styles.disabledButton]} onPress={() => { setEditingTrajectory(trajectory.name); setRenameDraft(trajectory.name); }}><Text style={styles.smallButtonText}>改名</Text></Pressable>
             <Pressable disabled={playbackActive || recording} style={[styles.deleteButton, (playbackActive || recording) && styles.disabledButton]} onPress={() => deleteTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>删除</Text></Pressable>
-            {selectedTrajectory === trajectory.name && <View style={styles.renameRow}><TextInput value={renameDraft} onChangeText={setRenameDraft} style={styles.renameInput} /><Pressable style={styles.smallButton} onPress={() => renameTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>保存</Text></Pressable></View>}
+            {editingTrajectory === trajectory.name && <View style={styles.renameRow}><TextInput value={renameDraft} onChangeText={setRenameDraft} style={styles.renameInput} /><Pressable style={styles.smallButton} onPress={() => renameTrajectory(trajectory.name)}><Text style={styles.smallButtonText}>保存</Text></Pressable></View>}
           </View>)}
         </View>}
       </ScrollView>
@@ -725,6 +754,7 @@ const styles = StyleSheet.create({
   sideButtonActive: { backgroundColor: '#295d8a' },
   sideText: { color: '#fff', fontWeight: '700' },
   handHint: { color: '#8796a3', fontSize: 12, marginVertical: 12 },
+  playbackUnavailable: { color: '#ffb454', fontSize: 12, marginVertical: 12 },
   jointRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginBottom: 10 },
   jointName: { color: '#c9d5df', width: 58, fontSize: 12, paddingTop: 22 },
   fieldCell: { flex: 1, minWidth: 0 },
@@ -747,6 +777,7 @@ const styles = StyleSheet.create({
   stopRecordButton: { backgroundColor: '#8d6330' },
   emptyText: { color: '#687987', textAlign: 'center', paddingVertical: 28 },
   trajectoryRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 7, borderTopWidth: 1, borderTopColor: '#22303c', paddingVertical: 10 },
+  trajectoryRowSelected: { backgroundColor: '#14283a' },
   trajectoryMeta: { flex: 1 },
   trajectoryTitle: { color: '#e7edf3', fontWeight: '700', fontSize: 14 },
   smallButton: { backgroundColor: '#295d8a', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 8 },
