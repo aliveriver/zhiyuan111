@@ -41,8 +41,8 @@ npm run typecheck
 npm start
 ```
 
-用 Expo Go 或 Development Build 打开 App。手机和电脑必须连接同一个允许设备互访的
-Wi-Fi，在地址栏填写 `ws://电脑局域网IP:8765`，点击“连接”。如果电脑地址为
+用 Expo Go、Development Build 或 EAS APK 打开 App。手机和电脑必须连接同一个允许设备互访的
+Wi-Fi，地址栏留空并点击“自动发现并连接”；App 会扫描手机所在 `/24` 子网中的桥接服务。也可在地址栏填写 `ws://电脑局域网IP:8765`，点击“连接”。如果电脑地址为
 `10.0.1.41`，则填写 `ws://10.0.1.41:8765`。
 
 ### 3. Mock 操作顺序

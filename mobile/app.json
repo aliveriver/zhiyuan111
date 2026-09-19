@@ -8,7 +8,11 @@
     "newArchEnabled": true,
     "android": {
       "package": "com.local.x2mobileteleop",
-      "usesCleartextTraffic": true
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "ACCESS_NETWORK_STATE",
+        "ACCESS_WIFI_STATE"
+      ]
     },
     "ios": {
       "bundleIdentifier": "com.local.x2mobileteleop",

@@ -41,8 +41,8 @@ npm run typecheck
 npm start
 ```
 
-手机用 Expo Go 或 Development Build 打开项目，在 App 中填写
-`ws://<PC2局域网IP>:8765`。先验证 App 的连接、解锁、摇杆、急停和断连停车，确认
+手机用 Expo Go、Development Build 或 EAS APK 打开项目。手机与 PC2 连接同一允许设备互访的 Wi-Fi，在 App 地址栏留空并点击“自动发现并连接”；App 会按手机当前 IPv4 扫描同一 `/24` 子网的 `8765` 端口并验证桥接协议。也可填写
+`ws://<PC2局域网IP>:8765` 后手动连接。先验证 App 的连接、解锁、摇杆、急停和断连停车，确认
 Mock 终端只打印预期命令后，才能切换真机后端。
 
 启动后日志应包含 `桥接源码: .../src/x2_ps5_teleop/bridge/server.py`。如果 App 仍提示
@@ -103,9 +103,11 @@ npx eas-cli build --platform android --profile preview
 ```
 
 项目中的 `mobile/eas.json` 已将 `preview` 配置为 APK。安装打包后的 App 后，不再需要
-Expo Go 或 Metro 的 `8081` 端口；App 仍需在界面中填写 PC2 的 WebSocket 地址，例如
+Expo Go 或 Metro 的 `8081` 端口；App 可自动发现 PC2，也可以在界面中填写 PC2 的 WebSocket 地址，例如
 `ws://10.0.1.41:8765`。EAS 构建本身需要访问 Expo 云服务，但打包后的 App 控制连接
 只需要手机能够访问 PC2 的 `8765` 端口。
+
+若 EAS APK 安装后无法连接，确认 PC2 桥接监听 `0.0.0.0:8765`，手机与 PC2 处于同一个非隔离 Wi-Fi，并在防火墙放行 TCP 8765；不要填写 `localhost` 或 `127.0.0.1`。iOS 首次自动发现必须允许“本地网络”。
 
 ## 机器人侧
 

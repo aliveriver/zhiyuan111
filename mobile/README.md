@@ -32,9 +32,9 @@ npx eas-cli build --platform android --profile preview
 npx eas-cli login
 ```
 
-用 Expo Go 或 Development Build 打开项目。手机和电脑连接同一局域网，在 App 的地址栏
-输入 `ws://<电脑局域网IP>:8765`，点击“连接”。Mock 模式会在服务端终端打印运动、模式
-和预设动作，不会控制真机。
+用 Expo Go 或 EAS APK 打开项目。手机和电脑连接同一局域网后，地址栏留空并点击“自动发现并连接”，App 会读取手机 IPv4 并扫描同一 `/24` 子网的 `8765` 端口，通过 WebSocket 握手确认 PC2 桥接服务。也可以手动输入 `ws://<电脑局域网IP>:8765`。Mock 模式会在服务端终端打印运动、模式和预设动作，不会控制真机。
+
+EAS 独立包不依赖 Expo Go 的 Metro 连接；PC2 必须以 `--host 0.0.0.0 --port 8765` 启动桥接，手机与 PC2 不能使用访客 Wi-Fi/AP 隔离。Android 已允许局域网明文 WebSocket，iOS 首次扫描时需要允许“本地网络”权限。
 
 ## 真机启动
 

@@ -16,6 +16,7 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import Slider from '@react-native-community/slider';
 import { isPlaybackBusy, playbackAfterDisconnect, PlaybackState } from './playbackState';
+import { discoverBridge } from './networkDiscovery';
 
 // Official HAL active-axis order, also present in v0.9.7 animation_player.yaml.
 const HAND_JOINTS = [
@@ -80,7 +81,6 @@ const disconnectedState = (current: BridgeState): BridgeState => {
 };
 type JoystickValue = { x: number; y: number };
 type TrajectoryInfo = { name: string; frames: number; duration_ms: number; arm_joints: number; left_hand_joints: number; right_hand_joints: number };
-const DEFAULT_URL = 'ws://10.0.1.41:8765';
 const MODES = [
   ['PASSIVE_DEFAULT', '被动'],
   ['DAMPING_DEFAULT', '阻尼'],
@@ -193,7 +193,7 @@ function Joystick({
 export default function App() {
   const { width } = useWindowDimensions();
   const compactLayout = width < 720;
-  const [url, setUrl] = useState(DEFAULT_URL);
+  const [url, setUrl] = useState('');
   const [statusText, setStatusText] = useState('未连接');
   const [bridgeState, setBridgeState] = useState<BridgeState>({
     state: 'IDLE',
@@ -249,6 +249,7 @@ export default function App() {
   const lastHeartbeatRef = useRef(0);
   const playbackStateRef = useRef<BridgeState['playback_state']>('idle');
   const motionRef = useRef<Motion>({ forward: 0, lateral: 0, angular: 0 });
+  const discoveringRef = useRef(false);
 
   useEffect(() => {
     playbackStateRef.current = bridgeState.playback_state;
@@ -299,15 +300,36 @@ export default function App() {
     if (notify) setStatusText(playbackWasActive ? '连接断开，MC 停止未确认' : '已断开');
   }, []);
 
-  const connect = useCallback(() => {
-    if (!url.trim() || socketRef.current?.readyState === WebSocket.OPEN) return;
+  const connect = useCallback(async (requestedUrl?: string) => {
+    if (socketRef.current?.readyState === WebSocket.OPEN || discoveringRef.current) return;
+    let targetUrl = (requestedUrl ?? url).trim();
+    if (!targetUrl) {
+      discoveringRef.current = true;
+      setStatusText('正在扫描同一局域网…');
+      try {
+        const discovered = await discoverBridge();
+        if (!discovered) {
+          setStatusText('未发现桥接服务，请确认 PC2 与手机在同一 Wi-Fi 且端口 8765 已开放');
+          return;
+        }
+        targetUrl = discovered.url;
+        setUrl(targetUrl);
+      } catch (error) {
+        console.warn('[teleop] bridge discovery failed', error);
+        setStatusText('无法读取手机局域网地址，请手动填写 ws://PC2:8765');
+        return;
+      } finally {
+        discoveringRef.current = false;
+      }
+    }
+    if (!targetUrl) return;
     closeConnection(false);
     const token = socketTokenRef.current + 1;
     socketTokenRef.current = token;
     sequenceRef.current = 0;
     setStatusText('连接中…');
     try {
-      const socket = new WebSocket(url.trim());
+      const socket = new WebSocket(targetUrl);
       socketRef.current = socket;
       socket.onopen = () => {
         if (socketTokenRef.current !== token) return;
@@ -585,8 +607,9 @@ export default function App() {
         </View>
 
         <View style={styles.connectionRow}>
-          <TextInput value={url} onChangeText={setUrl} autoCapitalize="none" autoCorrect={false} style={styles.urlInput} placeholder="ws://PC2:8765" placeholderTextColor="#6d7885" />
-          <Pressable style={styles.connectButton} onPress={connect}><Text style={styles.connectText}>连接</Text></Pressable>
+          <TextInput value={url} onChangeText={setUrl} autoCapitalize="none" autoCorrect={false} style={styles.urlInput} placeholder="留空自动发现，或填写 ws://PC2:8765" placeholderTextColor="#6d7885" />
+          <Pressable style={styles.connectButton} onPress={() => connect()}><Text style={styles.connectText}>{url.trim() ? '连接' : '自动发现并连接'}</Text></Pressable>
+          <Pressable style={styles.discoverButton} onPress={() => { setUrl(''); connect(''); }}><Text style={styles.connectText}>自动发现</Text></Pressable>
           <Text style={styles.stateText}>{bridgeState.state}{bridgeState.armed ? ' · 已解锁' : ' · 未解锁'}</Text>
         </View>
 
@@ -748,6 +771,7 @@ const styles = StyleSheet.create({
   urlInput: { flex: 1, color: '#e7edf3', backgroundColor: '#111a23', borderColor: '#273644', borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9, fontSize: 13 },
   rateInput: { color: '#e7edf3', backgroundColor: '#111a23', borderColor: '#273644', borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9, fontSize: 13, width: 120 },
   connectButton: { backgroundColor: '#295d8a', paddingHorizontal: 18, paddingVertical: 10, borderRadius: 8 },
+  discoverButton: { backgroundColor: '#246b58', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 8 },
   connectText: { color: '#fff', fontWeight: '700' },
   stateText: { color: '#9fabb8', minWidth: 128, textAlign: 'right', fontSize: 13 },
   tabs: { flexDirection: 'row', marginTop: 16, borderBottomWidth: 1, borderBottomColor: '#243341' },
