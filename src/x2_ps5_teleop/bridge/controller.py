@@ -21,6 +21,7 @@ from ..robot.mc_playback import MCPlayback
 from ..robot.motion import RobotInterface
 from ..teleop.state_machine import TeleopState
 from .hand_poses import HandPoseStore, validate_positions
+from .voice import load_voice_presets, public_voice_presets
 
 
 LOGGER = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ class BridgeSnapshot:
     control_capabilities: dict[str, Any] = field(default_factory=dict)
     recording_error: str | None = None
     last_hand_command: str | None = None
+    voice_state: str = "idle"
+    voice_preset: str | None = None
+    voice_error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +77,9 @@ class BridgeSnapshot:
             "control_capabilities": self.control_capabilities,
             "recording_error": self.recording_error,
             "last_hand_command": self.last_hand_command,
+            "voice_state": self.voice_state,
+            "voice_preset": self.voice_preset,
+            "voice_error": self.voice_error,
         }
 
 
@@ -93,6 +100,7 @@ class BridgeController:
         velocity_limits: tuple[float, float, float] = (0.12, 0.08, 0.15),
         trajectory_path: str | Path | None = None,
         hand_pose_path: str | Path | None = None,
+        voice_preset_path: str | Path | None = None,
         mc_playback: MCPlayback | None = None,
     ):
         if timeout <= 0:
@@ -118,6 +126,10 @@ class BridgeController:
         self.trajectory_path = Path(trajectory_path) if trajectory_path else None
         self.trajectories: dict[str, list[dict[str, Any]]] = self._load_trajectories()
         self.hand_poses = HandPoseStore(hand_pose_path)
+        self.voice_presets = load_voice_presets(voice_preset_path)
+        self.voice_state = "idle"
+        self.voice_preset: str | None = None
+        self.voice_error: str | None = None
         self.last_hand_command: str | None = None
         self.recording_error: str | None = None
         self.recording_name: str | None = None
@@ -230,6 +242,8 @@ class BridgeController:
                 self._trajectory_rename_locked(message)
             elif message_type == "trajectory_play":
                 await self._trajectory_command_locked(message, now)
+            elif message_type == "voice_play":
+                self._voice_play_locked(message, now)
             elif message_type == "estop":
                 self._estop_locked()
             elif message_type == "clear_estop":
@@ -406,6 +420,8 @@ class BridgeController:
         getter = getattr(self.robot, "control_capabilities", None)
         if getter is not None:
             capabilities = dict(getter())
+            capabilities.setdefault("voice_tts", False)
+            capabilities.setdefault("voice_file", False)
             if self.mc_playback:
                 capabilities.update(upper_body_playback=True, playback_backend="mc_animation",
                                     playback_progress_estimated=True,
@@ -418,8 +434,44 @@ class BridgeController:
                                             + "腰部由 MC 平衡控制；每次播放仍校验站立、状态与起点，进度为估算"))
             return capabilities
         return {"backend": "custom", "hand_position": False,
+                "voice_tts": False, "voice_file": False,
                 "upper_body_playback": False, "teaching": False,
                 "reason": "自定义后端未声明执行能力"}
+
+    def voice_preset_list(self) -> list[dict[str, str]]:
+        return public_voice_presets(self.voice_presets)
+
+    def _voice_play_locked(self, message: dict[str, Any], now: float) -> None:
+        if not self.armed or self.state != TeleopState.TELEOP:
+            raise BridgeError("not_armed", "请先进入 TELEOP")
+        preset_id = str(message.get("preset", "")).strip()
+        preset = self.voice_presets.get(preset_id)
+        if preset is None:
+            raise BridgeError("voice_not_found", "语音预设不存在")
+        mode = str(preset.get("mode", ""))
+        capability = "voice_tts" if mode == "tts" else "voice_file"
+        self._require_capability(capability)
+        player = getattr(self.robot, "play_voice", None)
+        if player is None:
+            raise BridgeError("voice_unavailable", "后端没有语音播放实现")
+        try:
+            player(
+                mode,
+                text=str(preset.get("text", "")) if mode == "tts" else None,
+                file_path=str(preset.get("file_path", "")) if mode == "file" else None,
+                file_name=str(preset.get("file_name", "")) if mode == "file" else None,
+                priority=int(preset.get("priority", 6)),
+                priority_weight=int(preset.get("priority_weight", 0)),
+            )
+        except (RuntimeError, ValueError, OSError) as exc:
+            self.voice_state = "error"
+            self.voice_preset = preset_id
+            self.voice_error = str(exc)
+            raise BridgeError("voice_failed", str(exc)) from exc
+        self.voice_state = "sent"
+        self.voice_preset = preset_id
+        self.voice_error = None
+        self.last_command_at = now
 
     def _require_capability(self, key: str) -> None:
         # Legacy third-party backends retain their old protocol path. New
@@ -908,6 +960,9 @@ class BridgeController:
             self.control_capabilities(),
             self.recording_error,
             self.last_hand_command,
+            self.voice_state,
+            self.voice_preset,
+            self.voice_error,
         )
 
     @staticmethod

@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 
 import pytest
 
@@ -98,6 +99,33 @@ def test_sequence_limits_and_velocity_are_safe():
         assert robot.calls[-1] == ("move", 0.12, -0.08, 0.15)
         with pytest.raises(BridgeError, match="严格递增"):
             await controller.handle("s1", {"type": "heartbeat", "sequence": 2}, now=10.2)
+
+    run(scenario())
+
+
+def test_voice_presets_are_dynamic_and_do_not_stop_motion(tmp_path):
+    stream = io.StringIO()
+    robot = MockRobot(stream)
+    voice_config = tmp_path / "voice_presets.json"
+    voice_config.write_text(json.dumps({"presets": [
+        {"id": "one", "label": "第一段", "mode": "file",
+         "file_path": "/var/tmp/voice", "file_name": "one.wav"},
+        {"id": "two", "label": "第二段", "mode": "file",
+         "file_path": "/var/tmp/voice", "file_name": "two.wav"},
+    ]}), encoding="utf-8")
+    controller = BridgeController(robot, voice_preset_path=voice_config)
+
+    async def scenario():
+        await controller.register("s1", "phone")
+        await controller.handle("s1", {"type": "arm", "enabled": True, "sequence": 1}, now=1)
+        assert [item["id"] for item in controller.voice_preset_list()] == ["one", "two"]
+        state = await controller.handle("s1", {"type": "voice_play", "preset": "one", "sequence": 2}, now=1.1)
+        assert state["voice_state"] == "sent"
+        await controller.handle("s1", {
+            "type": "velocity", "forward": 0.12, "lateral": 0.0, "angular": 0.0, "sequence": 3,
+        }, now=1.2)
+        assert "VOICE FILE path=/var/tmp/voice/one.wav" in stream.getvalue()
+        assert "MOVE vx=0.120 vy=0.000 wz=0.000" in stream.getvalue()
 
     run(scenario())
 

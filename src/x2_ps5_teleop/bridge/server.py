@@ -55,8 +55,9 @@ class TeleopBridgeServer:
             await self._send(session_id, {
                 "type": "hello_ack",
                 "protocol_version": PROTOCOL_VERSION,
-                "capabilities": ["velocity", "mode", "trajectory", "hand_target", "hand_positions", "hand_pose_library", "state_recording"],
+                "capabilities": ["velocity", "mode", "trajectory", "hand_target", "hand_positions", "hand_pose_library", "state_recording", "voice"],
                 "control_capabilities": self.controller.control_capabilities(),
+                "voice_presets": self.controller.voice_preset_list(),
             })
             await self._broadcast()
             async for raw in websocket:
@@ -155,6 +156,7 @@ async def serve(args) -> None:
         ),
         trajectory_path=args.data_dir / "trajectories.json",
         hand_pose_path=args.data_dir / "hand_poses.json",
+        voice_preset_path=args.voice_config,
         mc_playback=MCPlayback(profile, interlock_path=interlock_path) if profile else None,
     )
     server = TeleopBridgeServer(controller)
@@ -183,6 +185,8 @@ def main() -> None:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--data-dir", type=Path, default=Path.home() / ".x2_ps5_teleop",
                         help="轨迹和手部预设目录；Mock 联调应使用独立目录")
+    parser.add_argument("--voice-config", type=Path, default=Path("config/voice_presets.json"),
+                        help="固定语音预设 JSON；音频文件本身按预设放在 PC3")
     parser.add_argument("--mc-commissioning-profile", type=Path,
                         help="可选的已审阅 MC 现场验收 JSON；省略时进入有人值守测试模式")
     args = parser.parse_args()

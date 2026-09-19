@@ -31,8 +31,9 @@ const HAND_JOINTS = [
   ['pinky_pip_joint', '小指 · 屈伸'],
 ] as const;
 
-type ControlCapabilities = { backend: string; hand_position: boolean; upper_body_playback: boolean; teaching: boolean; reason: string; playback_backend?: string; playback_progress_estimated?: boolean; max_playback_speed?: number; commissioned?: boolean };
+type ControlCapabilities = { backend: string; hand_position: boolean; voice_tts?: boolean; voice_file?: boolean; upper_body_playback: boolean; teaching: boolean; reason: string; playback_backend?: string; playback_progress_estimated?: boolean; max_playback_speed?: number; commissioned?: boolean };
 type HandPose = { name: string; side: 'left' | 'right'; positions: number[]; requires_confirmation: boolean };
+type VoicePreset = { id: string; label: string; mode: 'tts' | 'file' };
 type HandField = 'position' | 'velocity' | 'acceleration' | 'deceleration' | 'effort';
 const HAND_FIELDS: Array<{ key: HandField; label: string; min: number; max: number }> = [
   { key: 'position', label: '位置', min: -1, max: 1 },
@@ -62,6 +63,9 @@ type BridgeState = {
   control_capabilities?: ControlCapabilities;
   recording_error?: string | null;
   last_hand_command?: string | null;
+  voice_state: 'idle' | 'sent' | 'error';
+  voice_preset: string | null;
+  voice_error: string | null;
 };
 const disconnectedState = (current: BridgeState): BridgeState => {
   const playback = playbackAfterDisconnect(current.playback_state, current.playback_error);
@@ -205,6 +209,9 @@ export default function App() {
     playback_progress_ms: 0,
     playback_duration_ms: 0,
     playback_error: null,
+    voice_state: 'idle',
+    voice_preset: null,
+    voice_error: null,
   });
   const [leftStick, setLeftStick] = useState<JoystickValue>({ x: 0, y: 0 });
   const [rightStick, setRightStick] = useState<JoystickValue>({ x: 0, y: 0 });
@@ -220,6 +227,7 @@ export default function App() {
     left: Array(10).fill('0'), right: Array(10).fill('0'),
   });
   const [handPoses, setHandPoses] = useState<HandPose[]>([]);
+  const [voicePresets, setVoicePresets] = useState<VoicePreset[]>([]);
   const [handPoseName, setHandPoseName] = useState('');
   const [confirmRelease, setConfirmRelease] = useState(false);
   const canSendHand = bridgeState.control_capabilities?.hand_position === true;
@@ -315,6 +323,7 @@ export default function App() {
             type?: string;
             protocol_version?: number;
             capabilities?: string[];
+            voice_presets?: VoicePreset[];
             state?: string | BridgeState;
             armed?: boolean;
             source?: string;
@@ -327,6 +336,7 @@ export default function App() {
           };
           if (message.type === 'hello_ack') {
             console.info('[teleop] bridge hello_ack', message.protocol_version, message.capabilities || []);
+            if (Array.isArray(message.voice_presets)) setVoicePresets(message.voice_presets);
           } else if (message.type === 'state') {
             setBridgeState((current) => {
               const next = bridgeStateFrom(message as Partial<BridgeState>, current);
@@ -362,6 +372,10 @@ export default function App() {
               if (payload.playback_state === 'paused') setStatusText(`已暂停：${payload.playback_name || ''}`);
               if (payload.playback_state === 'idle') setStatusText('播放已停止');
             }
+            if (message.request_type === 'voice_play' && payload.voice_state === 'sent') {
+              const preset = voicePresets.find((item) => item.id === payload.voice_preset);
+              setStatusText(`语音已发送：${preset?.label || payload.voice_preset || ''}`);
+            }
           } else if (message.type === 'trajectory_list' && Array.isArray(message.trajectories)) {
             setTrajectories(message.trajectories);
           } else if (message.type === 'error') {
@@ -388,7 +402,7 @@ export default function App() {
     } catch {
       setStatusText('无法创建 WebSocket');
     }
-  }, [closeConnection, send, url]);
+  }, [closeConnection, send, url, voicePresets]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -535,6 +549,13 @@ export default function App() {
     send({ type: 'trajectory_play', name, speed });
   };
   const controlPlayback = (command: 'pause' | 'resume' | 'stop') => send({ type: 'trajectory_play', command });
+  const playVoice = (preset: VoicePreset) => {
+    if (!bridgeState.armed) {
+      setStatusText('请先进入 TELEOP');
+      return;
+    }
+    send({ type: 'voice_play', preset: preset.id });
+  };
   const playbackPercent = bridgeState.playback_duration_ms > 0
     ? Math.min(100, Math.round(bridgeState.playback_progress_ms * 100 / bridgeState.playback_duration_ms))
     : 0;
@@ -593,6 +614,17 @@ export default function App() {
             <View style={styles.buttonGrid}>
               {MODES.map(([mode, label]) => <Pressable key={mode} disabled={playbackActive || recording} style={[styles.modeButton, (playbackActive || recording) && styles.disabledButton]} onPress={() => send({ type: 'mode', mode })}><Text style={styles.modeText}>{label}</Text></Pressable>)}
             </View>
+            <Text style={styles.sectionLabel}>固定语音</Text>
+            <View style={styles.voiceGrid}>
+              {voicePresets.map((preset) => <Pressable key={preset.id}
+                disabled={(preset.mode === 'tts' ? bridgeState.control_capabilities?.voice_tts : bridgeState.control_capabilities?.voice_file) !== true || !bridgeState.armed}
+                style={[styles.voiceButton, ((preset.mode === 'tts' ? bridgeState.control_capabilities?.voice_tts : bridgeState.control_capabilities?.voice_file) !== true || !bridgeState.armed) && styles.disabledButton]}
+                onPress={() => playVoice(preset)}>
+                <Text style={styles.modeText}>{preset.label}</Text>
+              </Pressable>)}
+            </View>
+            {bridgeState.voice_error ? <Text style={styles.playbackUnavailable}>{bridgeState.voice_error}</Text> : null}
+            {!voicePresets.length ? <Text style={styles.fieldHint}>连接后读取语音预设</Text> : null}
             <Text style={styles.sectionLabel}>携带奖状</Text>
             <Text style={styles.handHint}>抓稳后由人工使用官方行走；此阶段不播放或保持手臂轨迹。松手请到灵巧手预设页确认执行。</Text>
             <Pressable style={styles.presetButton} onPress={() => { setPage('hand'); send({ type: 'hand_pose_list' }); }}><Text style={styles.modeText}>选择手部抓握预设</Text></Pressable>
@@ -739,6 +771,8 @@ const styles = StyleSheet.create({
   estopText: { color: '#fff', fontWeight: '900', fontSize: 17 },
   sectionLabel: { color: '#8392a0', fontSize: 12, marginTop: 17, marginBottom: 8 },
   buttonGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  voiceGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  voiceButton: { backgroundColor: '#236d70', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 11, minWidth: 140, alignItems: 'center', flexGrow: 1 },
   modeButton: { backgroundColor: '#1a2e3f', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 11, minWidth: 76, alignItems: 'center', flexGrow: 1 },
   presetButton: { backgroundColor: '#332b48', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 11, minWidth: 118, alignItems: 'center', flexGrow: 1 },
   modeText: { color: '#dce7ef', fontSize: 13, fontWeight: '600' },

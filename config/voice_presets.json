@@ -1,0 +1,22 @@
+{
+  "presets": [
+    {
+      "id": "ten_years_review",
+      "label": "十年赛事回顾",
+      "mode": "file",
+      "file_path": "/agibot/data/var/hal_audio/file",
+      "file_name": "十年赛事回顾.wav",
+      "priority": 6,
+      "priority_weight": 0
+    },
+    {
+      "id": "ten_years_summary",
+      "label": "总结十年赛事",
+      "mode": "file",
+      "file_path": "/agibot/data/var/hal_audio/file",
+      "file_name": "总结十年赛事.wav",
+      "priority": 6,
+      "priority_weight": 0
+    }
+  ]
+}

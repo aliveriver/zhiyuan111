@@ -61,4 +61,9 @@ x2-teleop-bridge --robot x2 --host 0.0.0.0 --port 8765 --source mobile_app
 - 急停会锁存；确认安全后必须清除急停并重新进入 TELEOP。
 - 真机测试前必须清空周围空间并安排人员值守物理急停。
 
-完整网络、部署和故障排查说明见 [docs/MOBILE_APP_PLAN.md](../docs/MOBILE_APP_PLAN.md)。
+移动控制页的“固定语音”按钮由 PC2 Bridge 的 `config/voice_presets.json` 动态提供。
+配置中有几条预设就显示几个按钮；当前配置显示“十年赛事回顾”和“总结十年赛事”。每个
+`mode=file` 音频文件需按官方要求放在 PC3。语音请求不停车，发送期间可以继续使用移动控制页。
+
+完整网络、部署和故障排查说明见 [docs/MOBILE_APP_PLAN.md](../docs/MOBILE_APP_PLAN.md)，
+语音和 AP 记录见 [docs/VOICE_AP_MODE.md](../docs/VOICE_AP_MODE.md)。

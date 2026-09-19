@@ -48,6 +48,8 @@ class RobotInterface:
     def upper_body_teaching_step(self) -> None: ...
     def end_upper_body_teaching(self) -> None: ...
     def prepare_upper_body_playback(self, frame: dict[str, Any]) -> None: ...
+    def play_voice(self, mode: str, *, text: str | None = None, file_path: str | None = None,
+                   file_name: str | None = None, priority: int = 6, priority_weight: int = 0) -> None: ...
     def close(self) -> None: ...
 
 
@@ -66,6 +68,7 @@ class MockRobot(RobotInterface):
 
     def control_capabilities(self) -> dict[str, Any]:
         return {"backend": "mock", "hand_position": True, "upper_body_playback": True,
+                "voice_tts": True, "voice_file": True,
                 "teaching": False, "reason": "模拟模式：反馈和执行均为模拟，不代表真机验收"}
 
     def hand_positions(self, side: str, positions: list[float]) -> None:
@@ -118,6 +121,13 @@ class MockRobot(RobotInterface):
     def prepare_upper_body_playback(self, frame: dict[str, Any]) -> None:
         print(f"ARM PLAYBACK prepare joints={len(frame.get('arm', []))}", file=self.stream, flush=True)
 
+    def play_voice(self, mode: str, *, text: str | None = None, file_path: str | None = None,
+                   file_name: str | None = None, priority: int = 6, priority_weight: int = 0) -> None:
+        if mode == "tts":
+            print(f"VOICE TTS text={text or ''}", file=self.stream, flush=True)
+        else:
+            print(f"VOICE FILE path={file_path}/{file_name or ''}", file=self.stream, flush=True)
+
     def close(self) -> None:
         self.stop()
 
@@ -128,7 +138,10 @@ class X2RosRobot(RobotInterface):
     def control_capabilities(self) -> dict[str, Any]:
         # Restore the hand path previously exercised on this robot. Arm
         # ownership and interruptible animation remain separate capabilities.
-        return {"backend": "x2", "hand_position": True, "upper_body_playback": False,
+        return {"backend": "x2", "hand_position": True,
+                "voice_tts": getattr(self, "tts_client", None) is not None,
+                "voice_file": getattr(self, "audio_client", None) is not None,
+                "upper_body_playback": False,
                 "teaching": False,
                 "reason": "已恢复灵巧手参数与位置控制；机械臂控制权及动画停止链路尚未确认，真机上肢回放和卸力示教未开放"}
 
@@ -182,6 +195,13 @@ class X2RosRobot(RobotInterface):
             )
             from aimdk_msgs.srv import SetMcAction, SetMcInputSource, GetHandType, GetSystemState
             from aimdk_msgs.msg import McInputAction, McInputSource
+            try:
+                from aimdk_msgs.srv import PlayAudioFile, PlayTts
+                from aimdk_msgs.msg import TtsPriorityLevel
+            except ImportError:  # v0.9.7 installations may not expose optional audio types.
+                PlayAudioFile = None
+                PlayTts = None
+                TtsPriorityLevel = None
         except ImportError as exc:  # pragma: no cover - 仅在 ROS 主机上执行
             raise RuntimeError("X2 模式需要开发计算机上的 ROS 2 Humble 和 aimdk_msgs") from exc
         self._rclpy = rclpy
@@ -191,6 +211,9 @@ class X2RosRobot(RobotInterface):
                      JointCommandArray, JointCommand, JointStateArray, HandStateArray)
         self._srv = (SetMcAction, SetMcInputSource, GetHandType, GetSystemState)
         self._input_types = (McInputAction, McInputSource)
+        self._tts_service = PlayTts
+        self._audio_service = PlayAudioFile
+        self._tts_priority_type = TtsPriorityLevel
         if not rclpy.ok():
             rclpy.init()
         from rclpy.node import Node
@@ -210,6 +233,10 @@ class X2RosRobot(RobotInterface):
         self.source_client = self.node.create_client(SetMcInputSource, "/aimdk_5Fmsgs/srv/SetMcInputSource")
         self.hand_type_client = self.node.create_client(GetHandType, "/aimdk_5Fmsgs/srv/GetHandType")
         self.system_state_client = self.node.create_client(GetSystemState, "/aimdk_5Fmsgs/srv/GetSystemState")
+        self.tts_client = (self.node.create_client(PlayTts, "/aimdk_5Fmsgs/srv/PlayTts")
+                           if PlayTts is not None else None)
+        self.audio_client = (self.node.create_client(PlayAudioFile, "/aimdk_5Fmsgs/srv/PlayAudioFile")
+                             if PlayAudioFile is not None else None)
         try:
             self._require_services()
             self._register_source()
@@ -230,6 +257,45 @@ class X2RosRobot(RobotInterface):
         unavailable = [name for client, name in required if not client.wait_for_service(timeout_sec=2.0)]
         if unavailable:
             raise RuntimeError(f"AimDK 服务不可用: {', '.join(unavailable)}")
+
+    def play_voice(self, mode: str, *, text: str | None = None, file_path: str | None = None,
+                   file_name: str | None = None, priority: int = 6, priority_weight: int = 0) -> None:
+        if mode == "tts":
+            if self.tts_client is None or self._tts_service is None:
+                raise RuntimeError("当前 aimdk_msgs 未提供 PlayTts，需核对 v0.9.7 音频接口")
+            request = self._tts_service.Request()
+            request.tts_req.text = str(text or "")
+            request.tts_req.domain = "mobile_app"
+            request.tts_req.trace_id = "mobile_voice"
+            request.tts_req.is_interrupted = True
+            request.tts_req.priority_weight = int(priority_weight)
+            try:
+                request.tts_req.priority_level.value = int(priority)
+            except AttributeError:
+                request.tts_req.priority_level = int(priority)
+            request.header.header.stamp = self._now().to_msg()
+            future = self.tts_client.call_async(request)
+            response = self._wait_for_result(future, "播放 TTS", timeout=2.0)
+            result = response.tts_resp
+            if not result.is_success:
+                raise RuntimeError(f"TTS 播放失败: {result.error_message or result.error_code}")
+            return
+        if mode != "file" or self.audio_client is None or self._audio_service is None:
+            raise RuntimeError("当前 aimdk_msgs 未提供 PlayAudioFile")
+        if not file_path or not file_name:
+            raise ValueError("固定音频需要 file_path 和 file_name")
+        request = self._audio_service.Request()
+        request.file.pkg_name = "mobile_app"
+        request.file.file_path = str(file_path).rstrip("/") + "/"
+        request.file.file_name = str(file_name)
+        request.file.priority = int(priority)
+        request.file.priority_weight = int(priority_weight)
+        request.request.header.stamp = self._now().to_msg()
+        future = self.audio_client.call_async(request)
+        response = self._wait_for_result(future, "播放固定音频", timeout=2.0)
+        status = int(response.reponse.status.value)
+        if status != 1:
+            raise RuntimeError(f"固定音频播放失败，AimDK status={status}")
 
     def _wait_for_result(self, future, operation: str, timeout: float = 2.0):
         self._rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)

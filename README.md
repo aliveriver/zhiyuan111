@@ -66,7 +66,8 @@ uv run x2-ps5-input-test
 ## 手机 Expo App
 
 手机端代码位于 [mobile](mobile)，PC2 桥接服务位于 `src/x2_ps5_teleop/bridge`。
-完整流程见 [App 使用手册](docs/APP_USER_GUIDE.md)。
+完整流程见 [App 使用手册](docs/APP_USER_GUIDE.md)。固定语音和 AP 模式记录见
+[固定语音与 AP 使用记录](docs/VOICE_AP_MODE.md)。
 
 ### 本地 Mock 联调
 

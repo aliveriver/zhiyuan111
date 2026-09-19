@@ -170,8 +170,20 @@ Mock 保留逐帧播放。真机 MC 后端执行以下步骤：
 | 订阅 | `/aima/hal/joint/hand/state` | `HandStateArray` | 录制和手部反馈 |
 | 订阅 | `/aima/mc/common/state` | `McCommonState` | MC action/player 状态 |
 | 发布/订阅 | `/aima/hal/joint/arm/command` | `JointCommandArray` | 存在但当前真机不用于 MC 回放 |
+| 服务 | `/aimdk_5Fmsgs/srv/PlayTts` | `PlayTts` | 固定文字语音（可选，需固件提供） |
+| 服务 | `/aimdk_5Fmsgs/srv/PlayAudioFile` | `PlayAudioFile` | 固定 WAV/PCM 音频（可选，文件在 PC3） |
 
 MC 当前也发布手臂和手部 HAL 命令。向这些命令 topic 叠加发布会产生控制竞争；不能用它绕过 MC 控制权。
+
+### 4.1 固定语音
+
+APP 发送 `voice_play`，Bridge 根据 `config/voice_presets.json` 选择官方 `PlayTts` 或 `PlayAudioFile`。该请求不调用底盘停止接口，和移动速度控制并行；语音播放期间仍由现有速度帧和看门狗负责移动安全。`hello_ack` 返回 `voice_presets`，因此 APP 按配置条目动态生成按钮。
+
+```json
+{"type":"voice_play","preset":"ten_years_review","sequence":42}
+```
+
+`PlayAudioFile` 的 WAV/PCM 文件必须在 PC3 可读目录，当前配置对应 `十年赛事回顾.wav` 和 `总结十年赛事.wav`。当前硬件 `release-lx2501_3_t2d5-soc0-v0.9.7` 未连接验证，若 AimDK 未提供可选语音服务，Bridge 只拒绝语音请求，不影响既有移动接口。
 
 ## 5. 配置和部署
 
