@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import copy
+import logging
 import math
 import time
 import sys
@@ -33,6 +34,8 @@ HAND_PRESETS = {
     HandAction.L1: ("both", (0.0, 0.0, 0.0, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8)),  # 比个耶
     HandAction.LT: ("both", (0.0, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8)),  # 点个赞
 }
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RobotInterface:
@@ -179,6 +182,7 @@ class X2RosRobot(RobotInterface):
                 sys.path.insert(0, common_aimdk)
             import rclpy
             from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+            from rclpy.signals import SignalHandlerOptions
             from aimdk_msgs.msg import (
                 McLocomotionVelocity,
                 McActionCommand,
@@ -215,10 +219,11 @@ class X2RosRobot(RobotInterface):
         self._audio_service = PlayAudioFile
         self._tts_priority_type = TtsPriorityLevel
         if not rclpy.ok():
-            rclpy.init()
+            rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
         from rclpy.node import Node
         self.node = Node(node_name)
         self.source = source
+        self._source_registered = False
         self.preset_actions = preset_actions or PRESET_ACTIONS
         self.velocity_pub = self.node.create_publisher(McLocomotionVelocity, "/aima/mc/locomotion/velocity", 10)
         self.hand_pub = self.node.create_publisher(HandCommandArray, "/aima/hal/joint/hand/command", 10)
@@ -242,6 +247,7 @@ class X2RosRobot(RobotInterface):
             self._register_source()
             self._verify_hand_type()
         except Exception:
+            self._unregister_source()
             self.node.destroy_node()
             if self._rclpy.ok():
                 self._rclpy.shutdown()
@@ -322,6 +328,25 @@ class X2RosRobot(RobotInterface):
         # AimDK ResponseHeader uses code=0 for a successful request.
         if task.header.code != 0:
             raise RuntimeError(f"注册 AimDK 输入源被拒绝: code={task.header.code}, state={task.state.value}")
+        self._source_registered = True
+
+    def _unregister_source(self) -> None:
+        if not self._source_registered or not self._rclpy.ok():
+            return
+        try:
+            req = self._srv[1].Request()
+            req.request.header = self._msg[5]()
+            req.action.value = 1003
+            req.input_source.name = self.source
+            future = self.source_client.call_async(req)
+            response = self._wait_for_result(future, "注销 AimDK 输入源")
+            code = int(response.response.header.code)
+            if code != 0:
+                LOGGER.warning("注销 AimDK 输入源失败: source=%s code=%s", self.source, code)
+        except Exception as exc:
+            LOGGER.warning("注销 AimDK 输入源异常: source=%s error=%s", self.source, exc)
+        finally:
+            self._source_registered = False
 
     def _verify_hand_type(self) -> None:
         future = self.hand_type_client.call_async(self._srv[2].Request())
@@ -538,6 +563,7 @@ class X2RosRobot(RobotInterface):
     def close(self) -> None:
         if self._rclpy.ok():
             self.stop()
+            self._unregister_source()
         self.node.destroy_node()
         if self._rclpy.ok():
             self._rclpy.shutdown()
