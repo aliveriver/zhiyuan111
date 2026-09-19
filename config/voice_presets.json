@@ -17,6 +17,33 @@
       "file_name": "总结十年赛事.wav",
       "priority": 6,
       "priority_weight": 0
+    },
+    {
+      "id": "lian_xiaoli_intro",
+      "label": "我是连小理",
+      "mode": "file",
+      "file_path": "/agibot/data/var/hal_audio/file",
+      "file_name": "我是连小理.wav",
+      "priority": 6,
+      "priority_weight": 0
+    },
+    {
+      "id": "no_need_thanks",
+      "label": "不用谢",
+      "mode": "file",
+      "file_path": "/agibot/data/var/hal_audio/file",
+      "file_name": "不用谢.wav",
+      "priority": 6,
+      "priority_weight": 0
+    },
+    {
+      "id": "dagong_exhibition",
+      "label": "大工展台",
+      "mode": "file",
+      "file_path": "/agibot/data/var/hal_audio/file",
+      "file_name": "大工展台.wav",
+      "priority": 6,
+      "priority_weight": 0
     }
   ]
 }
