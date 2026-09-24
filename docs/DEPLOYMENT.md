@@ -66,8 +66,9 @@ cd ~/zhiyuan111-main
 `./scripts/start_mobile_bridge.sh status`，停止执行 `./scripts/start_mobile_bridge.sh stop`。
 日志默认写入 `/tmp/x2-ps5-teleop-$UID.log`。
 
-脚本会自动设置 `PYTHONPATH`，并检查当前用户是否为 `run`、`websockets`、`numpy`、`rclpy` 和
-`aimdk_msgs` 是否可导入。`aimdk_msgs` 的 Python 文件依赖 `numpy`，所以真机模式必须先
+脚本会自动设置 `PYTHONPATH`，并检查当前用户是否为 `run`、AimDK 环境以及
+`websockets`、`numpy`、`rclpy` 和 `aimdk_msgs` 是否可导入。PC2 使用手机热点时 IP
+通常是动态地址，脚本不依赖固定的 `10.0.1.41`；`aimdk_msgs` 的 Python 文件依赖 `numpy`，所以真机模式必须先
 在项目目录执行 `uv sync`。加载官方 `cobridge/setup.bash` 时，脚本会兼容其中读取未定义
 环境变量的写法，不会修改官方环境文件。若 `cobridge/setup.bash` 不在默认路径，可使用：
 

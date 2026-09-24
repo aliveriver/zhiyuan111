@@ -100,7 +100,12 @@ esac
 LOCAL_ADDRESSES="$(hostname -I 2>/dev/null || true)"
 [[ "$LOCAL_ADDRESSES" == *10.0.1.40* ]] && die "检测到 PC1 地址 10.0.1.40；请在 PC2 运行此脚本"
 if [[ "$ROBOT" == auto ]]; then
-    if [[ "$LOCAL_ADDRESSES" == *10.0.1.41* && "$(id -un)" == run ]]; then ROBOT=x2; else ROBOT=mock; fi
+    # PC2 may use a DHCP address from the phone hotspot. The wired
+    # 10.0.1.41 address is only one deployment path and must not decide the
+    # backend. The vendor run user identifies the robot-side deployment; the
+    # X2 branch below validates the AimDK environment. Other users remain on
+    # the safe Mock default. Do not require a particular interface address.
+    if [[ "$(id -un)" == run ]]; then ROBOT=x2; else ROBOT=mock; fi
 fi
 case "$ROBOT" in mock|x2) ;; *) die "--robot 只能是 mock 或 x2" ;; esac
 

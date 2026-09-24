@@ -4,6 +4,11 @@ export const BRIDGE_PORT = 8765;
 const DISCOVERY_TIMEOUT_MS = 450;
 const DISCOVERY_CONCURRENCY = 24;
 
+// Keep legacy fixed endpoints as quick fallbacks. In the normal hotspot setup
+// PC2 receives a DHCP address, so the phone's own subnet scan below remains the
+// primary discovery path.
+export const KNOWN_BRIDGE_HOSTS = ['10.0.1.41', '192.168.88.88'];
+
 export type DiscoveryResult = {
   url: string;
   ip: string;
@@ -73,7 +78,8 @@ function probeBridge(ip: string, clientId: string): Promise<boolean> {
 
 export async function discoverBridge(): Promise<DiscoveryResult | null> {
   const localIp = await Network.getIpAddressAsync();
-  const candidates = subnetCandidates(localIp);
+  const candidates = [...KNOWN_BRIDGE_HOSTS, ...subnetCandidates(localIp)]
+    .filter((ip, index, all) => all.indexOf(ip) === index);
   if (!candidates.length) return null;
   const clientId = `discovery-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   let cursor = 0;
