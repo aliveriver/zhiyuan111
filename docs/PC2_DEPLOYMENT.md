@@ -91,22 +91,15 @@ Mock 命令明确使用独立的 `/tmp/x2-award-mock-data`，不会将模拟录�
 
 ## 5. 启动 X2 桥接
 
-确认 `hostname -I` 包含 `10.0.1.41`，`id -un` 为 `run`，旧桥接端口已释放。以下命令直接调用模块，不依赖工作区已有启动脚本的换行格式。
+确认 `hostname -I` 包含 `10.0.1.41`，`id -un` 为 `run`。启动脚本会停止本项目旧桥接并在后台托管新进程，不需要 SSH 到机器人或手工管理 Python PID。
 
 ```bash
 cd /home/run/zhiyuan111
-source /agibot/software/cobridge/setup.bash
-export PYTHONPATH="$PWD/src:/agibot/software/common/local/lib/python3.10/dist-packages:/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages"
-export AMENT_PREFIX_PATH="/agibot/software/common:/agibot/software/ec:${AMENT_PREFIX_PATH:-}"
-export LD_LIBRARY_PATH="/agibot/software/common/lib:/agibot/software/ec/lib:${LD_LIBRARY_PATH:-}"
-export LD_PRELOAD="/agibot/software/common/lib/libaimdk_msgs__rosidl_generator_py.so${LD_PRELOAD:+:$LD_PRELOAD}"
-.venv/bin/python -c 'import rclpy, aimdk_msgs; print(aimdk_msgs.__file__)'
-.venv/bin/python -m x2_ps5_teleop.bridge.server \
-    --robot x2 --host 0.0.0.0 --port 8765 --source mobile_app \
-    --config /home/run/zhiyuan111/config/controller.json
+./scripts/start_mobile_bridge.sh restart --robot x2 --host 0.0.0.0 --port 8765 --source mobile_app
+./scripts/start_mobile_bridge.sh status
 ```
 
-`common` 的完整 `aimdk_msgs` 必须优先，不能被 `ec` 的同名精简包遮蔽。保留前台终端观察日志。首次部署不配置开机自动启动或无人值守自动重启。
+`common` 的完整 `aimdk_msgs` 必须优先，不能被 `ec` 的同名精简包遮蔽。日志默认在 `/tmp/x2-ps5-teleop-$UID.log`；停止或重启使用脚本的 `stop`/`restart`，不要直接 `pkill python`。
 
 启动成功应看到 WebSocket 监听日志及正确的源码路径。App 连接后应显示“未校验 commissioning 文件的有人值守测试模式”，轨迹回放可用但仍要求 TELEOP、稳定站立、MC 空闲和匹配的起始姿态。
 

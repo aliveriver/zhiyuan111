@@ -15,9 +15,20 @@ uv run x2-teleop-bridge --robot mock --host 0.0.0.0 --port 8765
 另开终端启动 App：
 
 ```powershell
+cd mobile
 npm install
 npm run typecheck
-npm start
+npx expo start -c
+```
+
+如果 Metro 报 `Unable to resolve "expo-network"`，请确认命令是在 `mobile` 目录执行，
+然后删除旧依赖并按锁文件重装：
+
+```powershell
+cd mobile
+Remove-Item -Recurse -Force node_modules
+npm ci
+npx expo start -c
 ```
 
 生成可直接安装到 Android 手机上的 APK：

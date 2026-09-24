@@ -45,10 +45,8 @@ npm start
 `ws://<PC2局域网IP>:8765` 后手动连接。先验证 App 的连接、解锁、摇杆、急停和断连停车，确认
 Mock 终端只打印预期命令后，才能切换真机后端。
 
-启动后日志应包含 `桥接源码: .../src/x2_ps5_teleop/bridge/server.py`。如果 App 仍提示
-“不支持的消息类型/预设动作”，说明 8765 端口仍由旧桥接进程占用；先停止旧进程，再用
-`./scripts/start_mobile_bridge.sh --robot x2 --host 0.0.0.0 --port 8765` 启动，不要直接
-运行系统中旧的 `x2-teleop-bridge` 可执行文件。
+启动后日志应包含 `桥接源码: .../src/x2_ps5_teleop/bridge/server.py`。脚本会先按本项目
+PID/命令行停止旧桥接，再启动新进程，不要直接运行系统中旧的 `x2-teleop-bridge` 可执行文件。
 
 ### 真机桥接启动
 
@@ -63,10 +61,10 @@ cd ~/zhiyuan111-main
 ./scripts/start_mobile_bridge.sh
 ```
 
-等价的显式写法是 `./scripts/start_mobile_bridge.sh --robot x2 --host 0.0.0.0 --port 8765
---source mobile_app`。服务以前台方式运行，终端中断（Ctrl-C）会先发送零速度再退出；
-需要后台运行时可使用 `nohup ./scripts/start_mobile_bridge.sh >~/x2-teleop-bridge.log 2>&1 &`
-并用 `ss -ltn | grep 8765` 检查监听状态，停止时执行 `kill <PID>`。
+等价的显式写法是 `./scripts/start_mobile_bridge.sh restart --robot x2 --host 0.0.0.0 --port 8765
+--source mobile_app`。脚本默认用 `nohup` 脱离 SSH/终端运行；检查状态执行
+`./scripts/start_mobile_bridge.sh status`，停止执行 `./scripts/start_mobile_bridge.sh stop`。
+日志默认写入 `/tmp/x2-ps5-teleop-$UID.log`。
 
 脚本会自动设置 `PYTHONPATH`，并检查当前用户是否为 `run`、`websockets`、`numpy`、`rclpy` 和
 `aimdk_msgs` 是否可导入。`aimdk_msgs` 的 Python 文件依赖 `numpy`，所以真机模式必须先
